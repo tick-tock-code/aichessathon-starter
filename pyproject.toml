@@ -13,6 +13,34 @@ dependencies = [
 [tool.uv]
 package = false
 
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["win-64"]
+
+[tool.pixi.dependencies]
+python = "3.12.*"
+
+[tool.pixi.pypi-dependencies]
+chess = "==1.11.2"
+numpy = "==2.5.2"
+numba = "==0.67.0"
+torch = { version = "==2.13.0", index = "https://download.pytorch.org/whl/cpu" }
+onnxruntime = "==1.29.0"
+mypy = ">=1.18"
+ruff = ">=0.14"
+
+[tool.pixi.pypi-options]
+extra-index-urls = ["https://download.pytorch.org/whl/cpu"]
+
+[tool.pixi.tasks]
+play = "python -m harness.play --white . --black baselines/greedy"
+arena = "python -m harness.arena --opponent baselines/greedy --games 20"
+zip = "python -m harness.package"
+lint = "ruff check ."
+typecheck = "mypy"
+smoke = "python -m harness.arena --opponent baselines/random --games 2 --base-ms 5000"
+gate = { depends-on = ["lint", "typecheck", "smoke"] }
+
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }
 
