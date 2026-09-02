@@ -66,11 +66,13 @@ class SearchEngine:
         evaluator: Evaluator | None = None,
         policy: PolicyScorer | None = None,
         policy_max_ply: int = 2,
+        time_manager: TimeManager | None = None,
     ) -> None:
         self.table_limit = table_limit
         self.evaluator = evaluator or evaluate_for_side_to_move
         self.policy = policy
         self.policy_max_ply = max(0, policy_max_ply)
+        self.time_manager = time_manager or TimeManager()
         self.tt: dict[PositionKey, TTEntry] = {}
         self.killers: list[list[chess.Move | None]] = [[None, None] for _ in range(MAX_PLY)]
         self.history: dict[tuple[bool, int, int], int] = {}
@@ -102,15 +104,15 @@ class SearchEngine:
         self._cancel = cancel
         start = perf_counter()
         if move_time_ms is None:
-            budget = TimeManager().initial_budget(board, time_left_ms)
+            budget = self.time_manager.initial_budget(board, time_left_ms)
         else:
             allocation = max(1, min(move_time_ms, max(1, time_left_ms - 10)))
-            signals = TimeManager.root_signals(board)
+            signals = self.time_manager.root_signals(board)
             budget = TimeBudget(
                 allocation,
                 allocation,
                 signals,
-                TimeManager.selectivity_for(time_left_ms, signals.urgency),
+                self.time_manager.selectivity_for(time_left_ms, signals.urgency),
             )
         self._selectivity = budget.selectivity
         self._deadline = start + budget.soft_ms / 1_000.0

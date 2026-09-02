@@ -17,6 +17,7 @@ from engine_aux import PolyglotBook, PonderController, PositionHistory, SyzygyTa
 from engine_core import SearchEngine
 from engine_experimental import ImplicitSearch, PhaseExpertRouter, PuctSearch, SquareTokenPolicy
 from engine_neural import ONNXPolicy, SparseNNUE
+from engine_time import TimeManager
 
 SUPPORTED_MODES: Final = frozenset({"alphabeta", "mcts", "dag", "policy", "implicit", "moe"})
 requested_mode = os.environ.get("CHESSATHON_ENGINE", "alphabeta").strip().lower()
@@ -29,6 +30,7 @@ BOOK = PolyglotBook()
 TABLEBASES = SyzygyTablebases()
 HISTORY = PositionHistory()
 PONDER = PonderController(enabled=os.environ.get("CHESSATHON_PONDER") == "1")
+TIME_MANAGER = TimeManager(os.environ.get("CHESSATHON_TIME_PROFILE", "balanced").strip().lower())
 
 
 def _nnue_side_to_move(board: chess.Board) -> int:
@@ -40,6 +42,7 @@ SEARCH = SearchEngine(
     evaluator=_nnue_side_to_move if NNUE.enabled else None,
     policy=POLICY.score_moves if POLICY.enabled else None,
     policy_max_ply=0,
+    time_manager=TIME_MANAGER,
 )
 TOKEN_POLICY = SquareTokenPolicy()
 EXPERTS = PhaseExpertRouter()

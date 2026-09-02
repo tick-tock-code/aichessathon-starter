@@ -120,6 +120,9 @@ class TimeManager:
             return SearchSelectivity(4, 8, 1, 4, 2, 175, 180, 10)
         return SearchSelectivity(3, 4, 2, 3, 2, 110, 120, 8)
 
+    def __init__(self, profile: str = "balanced") -> None:
+        self.profile = profile if profile in {"fast", "balanced", "safe"} else "balanced"
+
     def initial_budget(self, board: chess.Board, time_left_ms: int) -> TimeBudget:
         signals = self.root_signals(board)
         remaining = max(1, time_left_ms)
@@ -129,12 +132,18 @@ class TimeManager:
         base = remaining // expected_moves + self.increment_ms // 3
         phase_factor = 1.12 if expected_moves <= 18 else 1.0
         tactical_factor = 1.0 + min(0.45, signals.urgency * 0.06)
-        soft = int(base * phase_factor * tactical_factor)
+        profile_factor = {"fast": 0.72, "balanced": 1.0, "safe": 1.22}[self.profile]
+        soft = int(base * phase_factor * tactical_factor * profile_factor)
         soft = max(self.minimum_ms, min(self.maximum_soft_ms, soft, spendable))
         # A hard limit leaves room for an unstable principal variation to be
         # verified, but it is always below the remaining game clock.
         hard = min(spendable, max(soft, int(soft * 1.55)))
-        return TimeBudget(soft, hard, signals, self.selectivity_for(remaining, signals.urgency))
+        selectivity = self.selectivity_for(remaining, signals.urgency)
+        if self.profile == "fast" and signals.urgency < 4:
+            selectivity = SearchSelectivity(3, 3, 2, 3, 2, 95, 105, 7)
+        elif self.profile == "safe":
+            selectivity = SearchSelectivity(4, 7, 1, 4, 2, 165, 170, 10)
+        return TimeBudget(soft, hard, signals, selectivity)
 
     @staticmethod
     def should_stop_after_iteration(
