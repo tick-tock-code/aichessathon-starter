@@ -9,12 +9,12 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 import chess
-import chess.engine
 
 # The tool is intentionally executable directly, while the project package is
 # deliberately not installed as a wheel.
@@ -48,33 +48,63 @@ class StockfishAgent:
         self.executable = executable
         self.move_time_ms = move_time_ms
         self.skill = skill
-        self.engine: chess.engine.SimpleEngine | None = None
+        self.process: subprocess.Popen[str] | None = None
 
     def start(self, _: float) -> None:
         try:
-            self.engine = chess.engine.SimpleEngine.popen_uci(str(self.executable))
-            options: dict[str, object] = {"Threads": 1, "Hash": 64}
+            self.process = subprocess.Popen(
+                [str(self.executable)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+            )
+            self._send("uci")
+            self._wait_for("uciok")
+            self._send("setoption name Threads value 1")
+            self._send("setoption name Hash value 64")
             if self.skill is not None:
-                options["Skill Level"] = self.skill
-            self.engine.configure(options)
-        except (OSError, chess.engine.EngineError) as error:
+                self._send(f"setoption name Skill Level value {self.skill}")
+            self._send("isready")
+            self._wait_for("readyok")
+        except OSError as error:
             raise AgentFailure("init") from error
 
     def move(self, fen: str, _: int) -> str:
-        if self.engine is None:
+        if self.process is None:
             raise RuntimeError("Stockfish moved before start")
-        try:
-            result = self.engine.play(
-                chess.Board(fen), chess.engine.Limit(time=self.move_time_ms / 1_000)
-            )
-        except chess.engine.EngineError as error:
-            raise AgentFailure("crash") from error
-        return result.move.uci()
+        self._send(f"position fen {fen}")
+        self._send(f"go movetime {self.move_time_ms}")
+        while True:
+            line = self._readline()
+            if line.startswith("bestmove "):
+                return line.split()[1]
 
     def stop(self) -> None:
-        if self.engine is not None:
-            self.engine.quit()
-            self.engine = None
+        if self.process is not None:
+            if self.process.poll() is None:
+                self._send("quit")
+                self.process.wait(timeout=2)
+            self.process = None
+
+    def _send(self, command: str) -> None:
+        if self.process is None or self.process.stdin is None:
+            raise AgentFailure("crash")
+        self.process.stdin.write(command + "\n")
+        self.process.stdin.flush()
+
+    def _readline(self) -> str:
+        if self.process is None or self.process.stdout is None:
+            raise AgentFailure("crash")
+        line = self.process.stdout.readline()
+        if not line:
+            raise AgentFailure("crash")
+        return line.strip()
+
+    def _wait_for(self, expected: str) -> None:
+        while self._readline() != expected:
+            pass
 
 
 def _elo_difference(score: float) -> float | None:
