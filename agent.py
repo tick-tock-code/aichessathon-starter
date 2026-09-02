@@ -13,7 +13,13 @@ from typing import Final
 
 import chess
 
-from engine_aux import PolyglotBook, PonderController, PositionHistory, SyzygyTablebases
+from engine_aux import (
+    PgnEndgameTablebase,
+    PolyglotBook,
+    PonderController,
+    PositionHistory,
+    SyzygyTablebases,
+)
 from engine_core import SearchEngine
 from engine_experimental import ImplicitSearch, PhaseExpertRouter, PuctSearch, SquareTokenPolicy
 from engine_neural import ONNXPolicy, SparseNNUE
@@ -28,6 +34,7 @@ NNUE = SparseNNUE.from_shipped_weights()
 POLICY = ONNXPolicy()
 BOOK = PolyglotBook()
 TABLEBASES = SyzygyTablebases()
+PGN_TABLEBASES = PgnEndgameTablebase()
 HISTORY = PositionHistory()
 PONDER = PonderController(enabled=os.environ.get("CHESSATHON_PONDER") == "1")
 TIME_MANAGER = TimeManager(os.environ.get("CHESSATHON_TIME_PROFILE", "balanced").strip().lower())
@@ -138,6 +145,8 @@ def get_move(fen: str, time_left_ms: int) -> str:
                 move = None
     if move is None:
         move = TABLEBASES.choose(board)
+    if move is None:
+        move = PGN_TABLEBASES.choose(board)
     if move is None:
         move = BOOK.choose(board)
     if move is None:

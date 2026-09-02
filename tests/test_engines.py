@@ -8,6 +8,7 @@ import numpy as np
 
 import agent
 from engine_aux import (
+    PgnEndgameTablebase,
     PolyglotBook,
     PonderController,
     PositionHistory,
@@ -122,6 +123,13 @@ class OptionalComponentTests(unittest.TestCase):
         self.assertEqual(tablebases.choose(board), move)
         self.assertEqual(fake.calls, len(list(board.legal_moves)))
         self.assertEqual(tablebases.stats.hits, 1)
+
+    def test_downloaded_three_piece_export_produces_a_legal_move(self) -> None:
+        tablebase = PgnEndgameTablebase()
+        board = chess.Board("8/8/7k/8/7K/1P6/8/8 b - - 0 1")
+        move = tablebase.choose(board)
+        self.assertTrue(tablebase.enabled)
+        self.assertIn(move, board.legal_moves)
 
     def test_ponder_portfolio_caches_exact_matching_reply(self) -> None:
         completed = Event()

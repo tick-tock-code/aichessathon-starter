@@ -202,6 +202,82 @@ class SyzygyTablebases:
         self._cache.clear()
 
 
+class PgnEndgameTablebase:
+    """Read exact endgame choices exported as annotated Syzygy PGNs.
+
+    This is intentionally separate from :class:`SyzygyTablebases`: the latter
+    consumes native ``.rtbw``/``.rtbz`` files, while this compact fallback
+    consumes a team-supplied PGN export with ``WDL`` and move-list headers.
+    """
+
+    def __init__(self, relative_path: str = "weights/endgames.pgn", max_pieces: int = 3) -> None:
+        self.max_pieces = max(2, max_pieces)
+        self.stats = LookupStats()
+        self._moves: dict[str, tuple[chess.Move, ...]] = {}
+        path = _shipped_path(relative_path)
+        if path is None or not path.is_file():
+            return
+        try:
+            import chess.pgn
+
+            with path.open(encoding="utf-8", errors="replace") as handle:
+                while (headers := chess.pgn.read_headers(handle)) is not None:
+                    self._load_headers(headers)
+        except (OSError, ValueError):
+            self._moves.clear()
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self._moves)
+
+    def choose(self, board: chess.Board) -> chess.Move | None:
+        """Return an annotated legal move for a covered endgame position."""
+        self.stats.probes += 1
+        moves = self._moves.get(position_key(board))
+        if not moves:
+            self.stats.misses += 1
+            return None
+        legal = [move for move in moves if move in board.legal_moves]
+        if not legal:
+            self.stats.misses += 1
+            return None
+        self.stats.hits += 1
+        return min(legal, key=chess.Move.uci)
+
+    def _load_headers(self, headers: object) -> None:
+        # Headers is intentionally treated through ``get`` so the loader has
+        # no runtime dependency on python-chess's private PGN header types.
+        get = getattr(headers, "get", None)
+        if not callable(get):
+            return
+        fen = get("FEN")
+        wdl = get("WDL")
+        if not isinstance(fen, str) or not isinstance(wdl, str):
+            return
+        try:
+            board = chess.Board(fen)
+        except ValueError:
+            return
+        if len(board.piece_map()) > self.max_pieces:
+            return
+        header_name = {"Win": "WinningMoves", "Draw": "DrawingMoves", "Loss": "LosingMoves"}.get(
+            wdl
+        )
+        if header_name is None:
+            return
+        raw_moves = get(header_name, "")
+        if not isinstance(raw_moves, str):
+            return
+        moves: list[chess.Move] = []
+        for san in raw_moves.split(","):
+            try:
+                moves.append(board.parse_san(san.strip()))
+            except ValueError:
+                continue
+        if moves:
+            self._moves[position_key(board)] = tuple(moves)
+
+
 PonderWorker = Callable[[str, Event], object | None]
 
 
