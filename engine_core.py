@@ -15,6 +15,7 @@ from typing import Final, cast
 import chess
 
 from engine_eval import PIECE_VALUES, evaluate_for_side_to_move
+from engine_time import SearchSelectivity, TimeBudget, TimeManager
 
 INF: Final[int] = 1_000_000
 MATE: Final[int] = 100_000
@@ -49,6 +50,10 @@ class SearchStats:
     cutoffs: int = 0
     completed_depth: int = 0
     elapsed_ms: int = 0
+    allocated_soft_ms: int = 0
+    allocated_hard_ms: int = 0
+    root_second_score: int = -INF
+    stable_iterations: int = 0
 
 
 class SearchEngine:
@@ -71,7 +76,9 @@ class SearchEngine:
         self.history: dict[tuple[bool, int, int], int] = {}
         self.stats = SearchStats()
         self._deadline = 0.0
+        self._hard_deadline = 0.0
         self._cancel: CancelCheck | None = None
+        self._selectivity = SearchSelectivity(3, 4, 2, 3, 2, 110, 120, 8)
 
     def choose_move(
         self,
@@ -95,32 +102,55 @@ class SearchEngine:
         self._cancel = cancel
         start = perf_counter()
         if move_time_ms is None:
-            # Spend more in low-branching late games, never consume the whole increment.
-            allocation = min(
-                max(1, time_left_ms - 10), max(25, min(4_000, time_left_ms // 24 + 120))
-            )
+            budget = TimeManager().initial_budget(board, time_left_ms)
         else:
             allocation = max(1, min(move_time_ms, max(1, time_left_ms - 10)))
-        self._deadline = start + allocation / 1_000.0
+            signals = TimeManager.root_signals(board)
+            budget = TimeBudget(
+                allocation,
+                allocation,
+                signals,
+                TimeManager.selectivity_for(time_left_ms, signals.urgency),
+            )
+        self._selectivity = budget.selectivity
+        self._deadline = start + budget.soft_ms / 1_000.0
+        self._hard_deadline = start + budget.hard_ms / 1_000.0
+        self.stats.allocated_soft_ms = budget.soft_ms
+        self.stats.allocated_hard_ms = budget.hard_ms
 
         best_move = fallback
         best_score = -INF
+        previous_move: chess.Move | None = None
+        stable_iterations = 0
         aspiration = 45
         for depth in range(1, max_depth + 1):
             try:
                 if depth == 1:
-                    score, move = self._root_search(board, depth, -INF, INF)
+                    score, move, second_score = self._root_search(board, depth, -INF, INF)
                 else:
                     alpha = max(-INF, best_score - aspiration)
                     beta = min(INF, best_score + aspiration)
-                    score, move = self._root_search(board, depth, alpha, beta)
+                    score, move, second_score = self._root_search(board, depth, alpha, beta)
                     if score <= alpha or score >= beta:
-                        score, move = self._root_search(board, depth, -INF, INF)
+                        score, move, second_score = self._root_search(board, depth, -INF, INF)
                 if move is not None:
                     best_move, best_score = move, score
                     self.stats.completed_depth = depth
+                    self.stats.root_second_score = second_score
+                    stable_iterations = stable_iterations + 1 if move == previous_move else 0
+                    previous_move = move
+                    self.stats.stable_iterations = stable_iterations
                 aspiration = min(300, aspiration + 8)
                 if abs(best_score) >= MATE - MAX_PLY:
+                    break
+                elapsed_ms = int((perf_counter() - start) * 1_000)
+                if self._at_or_past_soft_deadline() and TimeManager.should_stop_after_iteration(
+                    elapsed_ms,
+                    budget,
+                    stable_iterations,
+                    max(0, best_score - second_score),
+                    abs(best_score) >= MATE - MAX_PLY,
+                ):
                     break
             except SearchTimeout:
                 break
@@ -129,7 +159,7 @@ class SearchEngine:
 
     def _root_search(
         self, board: chess.Board, depth: int, alpha: int, beta: int
-    ) -> tuple[int, chess.Move | None]:
+    ) -> tuple[int, chess.Move | None, int]:
         self._check_deadline()
         original_alpha = alpha
         key = self._key(board)
@@ -138,6 +168,7 @@ class SearchEngine:
         moves = self._ordered_moves(board, tt_move, 0)
         best_move: chess.Move | None = None
         best_score = -INF
+        second_score = -INF
         for index, move in enumerate(moves):
             board.push(move)
             try:
@@ -151,7 +182,10 @@ class SearchEngine:
             finally:
                 board.pop()
             if score > best_score:
+                second_score = best_score
                 best_score, best_move = score, move
+            elif score > second_score:
+                second_score = score
             if score > alpha:
                 alpha = score
             if alpha >= beta:
@@ -161,7 +195,7 @@ class SearchEngine:
         if best_score >= beta:
             flag = "lower"
         self._store(key, TTEntry(depth, best_score, flag, best_move))
-        return best_score, best_move
+        return best_score, best_move, second_score
 
     def _search(
         self, board: chess.Board, depth: int, alpha: int, beta: int, ply: int, allow_null: bool
@@ -201,14 +235,14 @@ class SearchEngine:
         # Null move pruning is gated by non-pawn material to avoid common pawn-endgame zugzwangs.
         if (
             allow_null
-            and depth >= 3
+            and depth >= self._selectivity.null_min_depth
             and not in_check
             and static_score >= beta
             and self._has_non_pawn_material(board, board.turn)
         ):
             board.push(chess.Move.null())
             try:
-                reduction = 2 + depth // 5
+                reduction = self._selectivity.null_reduction(depth)
                 null_score = -self._search(
                     board, depth - 1 - reduction, -beta, -beta + 1, ply + 1, False
                 )
@@ -227,13 +261,16 @@ class SearchEngine:
         for index, move in enumerate(moves):
             quiet = not board.is_capture(move) and move.promotion is None
             # A very modest futility margin at the final pre-quiescence ply.
-            if depth == 1 and quiet and not in_check and static_score + 110 <= alpha:
+            if (
+                depth == 1
+                and quiet
+                and not in_check
+                and static_score + self._selectivity.futility_margin <= alpha
+            ):
                 continue
             board.push(move)
             try:
-                reduction = 0
-                if depth >= 3 and index >= 4 and quiet and not in_check:
-                    reduction = 1 + (1 if index >= 10 and depth >= 5 else 0)
+                reduction = self._selectivity.lmr_reduction(depth, index, quiet, in_check)
                 if index == 0:
                     score = -self._search(board, depth - 1, -beta, -alpha, ply + 1, True)
                 else:
@@ -275,7 +312,7 @@ class SearchEngine:
         if board.is_stalemate():
             return 0
         in_check = board.is_check()
-        if qdepth >= 8:
+        if qdepth >= self._selectivity.qdepth_limit:
             return self._evaluate(board)
         stand_pat = self._evaluate(board)
         if not in_check:
@@ -298,7 +335,7 @@ class SearchEngine:
             if not in_check and move.promotion is None:
                 victim = board.piece_at(move.to_square)
                 victim_value = PIECE_VALUES[victim.piece_type] if victim is not None else 100
-                if stand_pat + victim_value + 120 < alpha:
+                if stand_pat + victim_value + self._selectivity.delta_margin < alpha:
                     continue
             board.push(move)
             try:
@@ -392,5 +429,8 @@ class SearchEngine:
         self.history[key] = min(32_000, self.history.get(key, 0) + depth * depth)
 
     def _check_deadline(self) -> None:
-        if (self._cancel is not None and self._cancel()) or perf_counter() >= self._deadline:
+        if (self._cancel is not None and self._cancel()) or perf_counter() >= self._hard_deadline:
             raise SearchTimeout
+
+    def _at_or_past_soft_deadline(self) -> bool:
+        return perf_counter() >= self._deadline

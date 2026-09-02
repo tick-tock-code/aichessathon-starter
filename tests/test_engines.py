@@ -33,6 +33,15 @@ class CoreSearchTests(unittest.TestCase):
     def test_mate_constant_dominates_evaluation(self) -> None:
         self.assertGreater(MATE, 10_000)
 
+    def test_search_records_budget_and_completes_iteration(self) -> None:
+        board = chess.Board()
+        engine = SearchEngine()
+        move = engine.choose_move(board, 1_000, max_depth=3, move_time_ms=50)
+        self.assertIn(move, board.legal_moves)
+        self.assertEqual(engine.stats.allocated_soft_ms, 50)
+        self.assertEqual(engine.stats.allocated_hard_ms, 50)
+        self.assertGreaterEqual(engine.stats.completed_depth, 1)
+
 
 class OptionalComponentTests(unittest.TestCase):
     def test_position_history_does_not_double_count_same_call(self) -> None:
