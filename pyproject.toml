@@ -38,8 +38,9 @@ arena = "python -m harness.arena --opponent baselines/greedy --games 20"
 zip = "python -m harness.package"
 lint = "ruff check ."
 typecheck = "mypy"
+test = "python -m unittest discover -s tests"
 smoke = "python -m harness.arena --opponent baselines/random --games 2 --base-ms 5000"
-gate = { depends-on = ["lint", "typecheck", "smoke"] }
+gate = { depends-on = ["lint", "typecheck", "test", "smoke"] }
 
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }
@@ -62,4 +63,12 @@ ignore = ["N818"]
 
 [tool.mypy]
 strict = true
-files = ["agent.py", "harness"]
+files = [
+    "agent.py",
+    "engine_aux.py",
+    "engine_core.py",
+    "engine_eval.py",
+    "engine_experimental.py",
+    "engine_neural.py",
+    "harness",
+]
