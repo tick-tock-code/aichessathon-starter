@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -213,6 +213,17 @@ class PonderResult:
     value: object | None
 
 
+@dataclass(slots=True)
+class PonderStats:
+    """In-memory observability for local ponder experiments."""
+
+    branches_started: int = 0
+    branches_completed: int = 0
+    cache_hits: int = 0
+    cache_misses: int = 0
+    cancellations: int = 0
+
+
 class PonderController:
     """Opt-in pondering with no shared boards, TT, or search state.
 
@@ -228,22 +239,49 @@ class PonderController:
         self._stop = Event()
         self._lock = Lock()
         self._thread: Thread | None = None
-        self._result: PonderResult | None = None
+        self._results: dict[str, PonderResult] = {}
+        self.stats = PonderStats()
 
     def start(self, predicted_fen: str, worker: PonderWorker) -> bool:
-        """Start one opt-in background prediction; return false when unavailable."""
+        """Start one opt-in background prediction; retained as a simple API."""
+        return self.start_many((predicted_fen,), worker)
+
+    def start_many(
+        self,
+        predicted_fens: Sequence[str],
+        worker: PonderWorker,
+        *,
+        max_branches: int = 3,
+    ) -> bool:
+        """Prepare a small ordered portfolio of replies on one worker thread.
+
+        Branches are deliberately searched sequentially. The competition grants
+        one CPU core, so parallel branches would compete with each other rather
+        than make useful preparation faster.
+        """
         if not self.enabled:
             return False
         if not self.stop_for_timed_search():
             return False
+        limit = max(1, max_branches)
+        unique_fens = tuple(dict.fromkeys(predicted_fens))[:limit]
+        if not unique_fens:
+            return False
         self._stop = Event()
-        self._result = None
+        with self._lock:
+            self._results.clear()
 
         def run() -> None:
-            value = worker(predicted_fen, self._stop)
-            if not self._stop.is_set():
+            for predicted_fen in unique_fens:
+                if self._stop.is_set():
+                    return
+                self.stats.branches_started += 1
+                value = worker(predicted_fen, self._stop)
+                if self._stop.is_set():
+                    return
                 with self._lock:
-                    self._result = PonderResult(predicted_fen, value)
+                    self._results[predicted_fen] = PonderResult(predicted_fen, value)
+                    self.stats.branches_completed += 1
 
         self._thread = Thread(target=run, name="chess-ponder", daemon=True)
         self._thread.start()
@@ -261,6 +299,7 @@ class PonderController:
         self._stop.set()
         thread.join(timeout=max(0.0, join_timeout_s))
         if thread.is_alive():
+            self.stats.cancellations += 1
             return False
         self._thread = None
         return True
@@ -268,8 +307,10 @@ class PonderController:
     def take(self, current_fen: str) -> object | None:
         """Consume a completed prediction only if it matches the actual position."""
         with self._lock:
-            result = self._result
-            self._result = None
-        if result is None or result.predicted_fen != current_fen:
+            result = self._results.get(current_fen)
+            self._results.clear()
+        if result is None:
+            self.stats.cache_misses += 1
             return None
+        self.stats.cache_hits += 1
         return result.value

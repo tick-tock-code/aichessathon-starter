@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import unittest
+from threading import Event
 
 import chess
 import numpy as np
 
 import agent
-from engine_aux import PolyglotBook, PositionHistory, SyzygyTablebases, position_key
+from engine_aux import (
+    PolyglotBook,
+    PonderController,
+    PositionHistory,
+    SyzygyTablebases,
+    position_key,
+)
 from engine_core import MATE, SearchEngine
 from engine_experimental import (
     ImplicitSearch,
@@ -115,6 +122,40 @@ class OptionalComponentTests(unittest.TestCase):
         self.assertEqual(tablebases.choose(board), move)
         self.assertEqual(fake.calls, len(list(board.legal_moves)))
         self.assertEqual(tablebases.stats.hits, 1)
+
+    def test_ponder_portfolio_caches_exact_matching_reply(self) -> None:
+        completed = Event()
+        calls: list[str] = []
+
+        def worker(fen: str, stop: Event) -> str | None:
+            if stop.is_set():
+                return None
+            calls.append(fen)
+            if fen == "second":
+                completed.set()
+            return f"move-for-{fen}"
+
+        ponder = PonderController(enabled=True)
+        self.assertTrue(ponder.start_many(("first", "second", "third"), worker, max_branches=2))
+        self.assertTrue(completed.wait(timeout=1.0))
+        self.assertTrue(ponder.stop_for_timed_search(join_timeout_s=0.1))
+        self.assertEqual(calls, ["first", "second"])
+        self.assertEqual(ponder.take("second"), "move-for-second")
+        self.assertEqual(ponder.stats.cache_hits, 1)
+
+    def test_ponder_rejects_nonmatching_reply(self) -> None:
+        completed = Event()
+
+        def worker(_: str, __: Event) -> str:
+            completed.set()
+            return "e2e4"
+
+        ponder = PonderController(enabled=True)
+        self.assertTrue(ponder.start("predicted", worker))
+        self.assertTrue(completed.wait(timeout=1.0))
+        self.assertTrue(ponder.stop_for_timed_search(join_timeout_s=0.1))
+        self.assertIsNone(ponder.take("actual"))
+        self.assertEqual(ponder.stats.cache_misses, 1)
 
 
 class ExperimentalTests(unittest.TestCase):

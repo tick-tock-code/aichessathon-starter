@@ -33,6 +33,17 @@ PONDER = PonderController(enabled=os.environ.get("CHESSATHON_PONDER") == "1")
 TIME_MANAGER = TimeManager(os.environ.get("CHESSATHON_TIME_PROFILE", "balanced").strip().lower())
 
 
+def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+    return max(minimum, min(maximum, value))
+
+
+PONDER_BRANCHES: Final = _bounded_env_int("CHESSATHON_PONDER_BRANCHES", 3, 1, 4)
+
+
 def _nnue_side_to_move(board: chess.Board) -> int:
     score = NNUE.evaluate(board)
     return score if board.turn == chess.WHITE else -score
@@ -63,17 +74,26 @@ def _ponder_worker(predicted_fen: str, stop: Event) -> str | None:
 
 
 def _start_pondering(board: chess.Board, our_move: chess.Move) -> None:
-    """Predict one opponent reply and search our response in the background."""
+    """Prepare responses to a small policy-ranked portfolio of opponent replies."""
     if not PONDER.enabled:
         return
-    predicted = board.copy(stack=False)
-    predicted.push(our_move)
-    if predicted.is_game_over(claim_draw=True):
+    after_our_move = board.copy(stack=False)
+    after_our_move.push(our_move)
+    if after_our_move.is_game_over(claim_draw=True):
         return
-    opponent_move = TOKEN_POLICY.choose(predicted)
-    predicted.push(opponent_move)
-    if not predicted.is_game_over(claim_draw=True):
-        PONDER.start(predicted.fen(), _ponder_worker)
+    replies = list(after_our_move.legal_moves)
+    try:
+        scores = TOKEN_POLICY.scores(after_our_move, replies)
+        replies.sort(key=lambda move: (scores.get(move, float("-inf")), move.uci()), reverse=True)
+    except (RuntimeError, TypeError, ValueError, OverflowError):
+        replies.sort(key=chess.Move.uci)
+    predicted_fens: list[str] = []
+    for opponent_move in replies[:PONDER_BRANCHES]:
+        predicted = after_our_move.copy(stack=False)
+        predicted.push(opponent_move)
+        if not predicted.is_game_over(claim_draw=True):
+            predicted_fens.append(predicted.fen())
+    PONDER.start_many(predicted_fens, _ponder_worker, max_branches=PONDER_BRANCHES)
 
 
 def _move_budget_ms(time_left_ms: int) -> int:
