@@ -6,7 +6,7 @@ import chess
 import numpy as np
 
 import agent
-from engine_aux import PositionHistory, position_key
+from engine_aux import PolyglotBook, PositionHistory, SyzygyTablebases, position_key
 from engine_core import MATE, SearchEngine
 from engine_experimental import (
     ImplicitSearch,
@@ -67,6 +67,54 @@ class OptionalComponentTests(unittest.TestCase):
         rebuilt = nnue.accumulator(board)
         np.testing.assert_array_equal(child.activations, rebuilt.activations)
         self.assertEqual(nnue.evaluate(board, child), nnue.evaluate(board, rebuilt))
+
+    def test_book_choice_is_deterministic_and_cached(self) -> None:
+        class Entry:
+            def __init__(self, move: chess.Move, weight: int) -> None:
+                self.move = move
+                self.weight = weight
+
+        class Reader:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def find_all(self, _: chess.Board) -> list[Entry]:
+                self.calls += 1
+                return [
+                    Entry(chess.Move.from_uci("e2e4"), 10),
+                    Entry(chess.Move.from_uci("d2d4"), 20),
+                ]
+
+        book = PolyglotBook("missing.bin")
+        reader = Reader()
+        book._reader = reader
+        board = chess.Board()
+        self.assertEqual(book.choose(board), chess.Move.from_uci("d2d4"))
+        self.assertEqual(book.choose(board), chess.Move.from_uci("d2d4"))
+        self.assertEqual(reader.calls, 1)
+        self.assertEqual(book.stats.hits, 1)
+
+    def test_tablebase_choice_is_legal_and_cached(self) -> None:
+        class Tablebase:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def probe_wdl(self, _: chess.Board) -> int:
+                self.calls += 1
+                return -2
+
+            def probe_dtz(self, _: chess.Board) -> int:
+                return 1
+
+        tablebases = SyzygyTablebases("missing")
+        fake = Tablebase()
+        tablebases._tablebase = fake
+        board = chess.Board("8/8/8/8/8/6K1/5Q2/7k w - - 0 1")
+        move = tablebases.choose(board)
+        self.assertIn(move, board.legal_moves)
+        self.assertEqual(tablebases.choose(board), move)
+        self.assertEqual(fake.calls, len(list(board.legal_moves)))
+        self.assertEqual(tablebases.stats.hits, 1)
 
 
 class ExperimentalTests(unittest.TestCase):
