@@ -7,6 +7,7 @@ they can be benchmarked without destabilising the default agent.
 
 from __future__ import annotations
 
+import json
 import os
 from threading import Event
 from typing import Final
@@ -54,6 +55,35 @@ PONDER_BRANCHES: Final = _bounded_env_int("CHESSATHON_PONDER_BRANCHES", 3, 1, 4)
 def _nnue_side_to_move(board: chess.Board) -> int:
     score = NNUE.evaluate(board)
     return score if board.turn == chess.WHITE else -score
+
+
+def _emit_metrics(time_left_ms: int, source: str) -> None:
+    """Write developer telemetry to stderr via the local harness, when requested."""
+    if os.environ.get("CHESSATHON_METRICS") != "1":
+        return
+    stats = SEARCH.stats
+    payload = {
+        "profile": TIME_MANAGER.profile,
+        "source": source,
+        "time_left_ms": time_left_ms,
+        "elapsed_ms": stats.elapsed_ms if source == "search" else 0,
+        "allocated_soft_ms": stats.allocated_soft_ms if source == "search" else 0,
+        "allocated_hard_ms": stats.allocated_hard_ms if source == "search" else 0,
+        "depth": stats.completed_depth if source == "search" else 0,
+        "nodes": stats.nodes if source == "search" else 0,
+        "qnodes": stats.qnodes if source == "search" else 0,
+        "tt_hits": stats.tt_hits if source == "search" else 0,
+        "cutoffs": stats.cutoffs if source == "search" else 0,
+        "best_score": stats.root_best_score if source == "search" else 0,
+        "second_score": stats.root_second_score if source == "search" else 0,
+        "stable_iterations": stats.stable_iterations if source == "search" else 0,
+        "best_move_changes": stats.best_move_changes if source == "search" else 0,
+        "root_urgency": stats.root_urgency if source == "search" else 0,
+        "root_legal_moves": stats.root_legal_moves if source == "search" else 0,
+        "root_checking_moves": stats.root_checking_moves if source == "search" else 0,
+        "root_capturing_moves": stats.root_capturing_moves if source == "search" else 0,
+    }
+    print("CHESSATHON_METRIC " + json.dumps(payload, separators=(",", ":"), sort_keys=True))
 
 
 SEARCH = SearchEngine(
@@ -135,20 +165,29 @@ def get_move(fen: str, time_left_ms: int) -> str:
     HISTORY.observe(board)
 
     move: chess.Move | None = None
+    source = "search"
     if ponder_stopped:
         pondered = PONDER.take(board.fen())
         if isinstance(pondered, str):
             try:
                 candidate = chess.Move.from_uci(pondered)
                 move = candidate if candidate in legal_moves else None
+                if move is not None:
+                    source = "ponder"
             except chess.InvalidMoveError:
                 move = None
     if move is None:
         move = TABLEBASES.choose(board)
+        if move is not None:
+            source = "syzygy"
     if move is None:
         move = PGN_TABLEBASES.choose(board)
+        if move is not None:
+            source = "endgame_pgn"
     if move is None:
         move = BOOK.choose(board)
+        if move is not None:
+            source = "book"
     if move is None:
         move = _experimental_move(board, time_left_ms)
 
@@ -156,5 +195,7 @@ def get_move(fen: str, time_left_ms: int) -> str:
     # barrier because one illegal response loses the game immediately.
     if move not in legal_moves:
         move = SEARCH.choose_move(board, time_left_ms)
+        source = "search"
     _start_pondering(board, move)
+    _emit_metrics(time_left_ms, source)
     return move.uci()

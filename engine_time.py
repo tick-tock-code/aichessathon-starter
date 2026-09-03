@@ -121,7 +121,9 @@ class TimeManager:
         return SearchSelectivity(3, 4, 2, 3, 2, 110, 120, 8)
 
     def __init__(self, profile: str = "balanced") -> None:
-        self.profile = profile if profile in {"fast", "balanced", "safe"} else "balanced"
+        self.profile = (
+            profile if profile in {"very_fast", "fast", "balanced", "safe"} else "balanced"
+        )
 
     def initial_budget(self, board: chess.Board, time_left_ms: int) -> TimeBudget:
         signals = self.root_signals(board)
@@ -132,15 +134,29 @@ class TimeManager:
         base = remaining // expected_moves + self.increment_ms // 3
         phase_factor = 1.12 if expected_moves <= 18 else 1.0
         tactical_factor = 1.0 + min(0.45, signals.urgency * 0.06)
-        profile_factor = {"fast": 0.72, "balanced": 1.0, "safe": 1.22}[self.profile]
+        # Balanced is deliberately adaptive rather than uniformly slower: in
+        # quiet positions its extra nodes were not earning their keep. It only
+        # becomes more conservative when forcing root features warrant it.
+        if self.profile == "very_fast":
+            profile_factor = 0.50
+        elif self.profile == "fast":
+            profile_factor = 0.72
+        elif self.profile == "balanced":
+            profile_factor = 1.0 if signals.urgency >= 3 else 0.80
+        else:
+            profile_factor = 1.22
         soft = int(base * phase_factor * tactical_factor * profile_factor)
         soft = max(self.minimum_ms, min(self.maximum_soft_ms, soft, spendable))
         # A hard limit leaves room for an unstable principal variation to be
         # verified, but it is always below the remaining game clock.
         hard = min(spendable, max(soft, int(soft * 1.55)))
         selectivity = self.selectivity_for(remaining, signals.urgency)
-        if self.profile == "fast" and signals.urgency < 4:
+        if self.profile == "very_fast" and signals.urgency < 4:
+            selectivity = SearchSelectivity(3, 2, 2, 3, 2, 75, 85, 6)
+        elif self.profile == "fast" and signals.urgency < 4:
             selectivity = SearchSelectivity(3, 3, 2, 3, 2, 95, 105, 7)
+        elif self.profile == "balanced" and signals.urgency < 3:
+            selectivity = SearchSelectivity(3, 3, 2, 3, 2, 100, 110, 7)
         elif self.profile == "safe":
             selectivity = SearchSelectivity(4, 7, 1, 4, 2, 165, 170, 10)
         return TimeBudget(soft, hard, signals, selectivity)

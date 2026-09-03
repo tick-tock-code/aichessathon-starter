@@ -7,11 +7,12 @@ Example:
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import chess
@@ -39,6 +40,53 @@ class ScoreSummary:
     @property
     def score(self) -> float:
         return (self.wins + self.draws * 0.5) / self.games if self.games else 0.0
+
+
+@dataclass(slots=True)
+class MetricSummary:
+    """Aggregate developer telemetry emitted by the agent during one profile."""
+
+    moves: int = 0
+    totals: dict[str, float] = field(default_factory=dict)
+    sources: dict[str, int] = field(default_factory=dict)
+
+    def add(self, record: dict[str, object]) -> None:
+        self.moves += 1
+        source = str(record.get("source", "unknown"))
+        self.sources[source] = self.sources.get(source, 0) + 1
+        excluded = {"time_left_ms", "best_score", "second_score"}
+        for key, value in record.items():
+            if isinstance(value, (int, float)) and key not in excluded:
+                self.totals[key] = self.totals.get(key, 0.0) + float(value)
+
+    def report(self) -> None:
+        if not self.moves:
+            return
+        averages = {
+            key: value / self.moves
+            for key, value in self.totals.items()
+            if key
+            in {
+                "elapsed_ms",
+                "allocated_soft_ms",
+                "allocated_hard_ms",
+                "depth",
+                "nodes",
+                "qnodes",
+                "tt_hits",
+                "cutoffs",
+                "stable_iterations",
+                "best_move_changes",
+                "root_urgency",
+                "root_legal_moves",
+                "root_checking_moves",
+                "root_capturing_moves",
+            }
+        }
+        formatted = ", ".join(f"{key}={value:.1f}" for key, value in sorted(averages.items()))
+        sources = ", ".join(f"{key}={count}" for key, count in sorted(self.sources.items()))
+        print(f"metrics per move ({self.moves} moves): {formatted}")
+        print(f"move sources: {sources}")
 
 
 class StockfishAgent:
@@ -137,9 +185,29 @@ def _report(summary: ScoreSummary, reference_elo: int | None) -> None:
             print(f"Provisional agent Elo: {reference_elo + difference:.0f}")
 
 
+def _metrics_from_stderr(stderr: str) -> list[dict[str, object]]:
+    prefix = "CHESSATHON_METRIC "
+    records: list[dict[str, object]] = []
+    for line in stderr.splitlines():
+        if not line.startswith(prefix):
+            continue
+        try:
+            payload = json.loads(line.removeprefix(prefix))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            records.append(payload)
+    return records
+
+
 def run_profile(arguments: argparse.Namespace, profile: str) -> ScoreSummary:
     os.environ["CHESSATHON_TIME_PROFILE"] = profile
+    if arguments.metrics_file is not None:
+        os.environ["CHESSATHON_METRICS"] = "1"
+    else:
+        os.environ.pop("CHESSATHON_METRICS", None)
     wins = draws = losses = 0
+    metrics = MetricSummary()
     for game in range(arguments.games):
         plays_white = game % 2 == 0
         stockfish = StockfishAgent(
@@ -155,6 +223,13 @@ def run_profile(arguments: argparse.Namespace, profile: str) -> ScoreSummary:
             arguments.ply_cap,
             arguments.start_fen,
         )
+        for record in _metrics_from_stderr(ours.stderr_tail):
+            record["profile"] = profile
+            record["game"] = game + 1
+            metrics.add(record)
+            if arguments.metrics_file is not None:
+                with arguments.metrics_file.open("a", encoding="utf-8") as output:
+                    output.write(json.dumps(record, sort_keys=True) + "\n")
         if outcome.termination in FAILED_TERMINATIONS:
             raise SystemExit(f"agent failure in game {game + 1}: {outcome.termination}")
         if outcome.result == "draw":
@@ -167,6 +242,7 @@ def run_profile(arguments: argparse.Namespace, profile: str) -> ScoreSummary:
             f"{profile} game {game + 1}/{arguments.games}: "
             f"{outcome.result} ({outcome.termination})"
         )
+    metrics.report()
     return ScoreSummary(wins, draws, losses)
 
 
@@ -182,7 +258,8 @@ def main() -> None:
     parser.add_argument("--stockfish-move-ms", type=int, default=100)
     parser.add_argument("--skill", type=int, choices=range(0, 21))
     parser.add_argument("--reference-elo", type=int)
-    parser.add_argument("--profiles", default="fast,balanced,safe")
+    parser.add_argument("--profiles", default="very_fast,fast,balanced")
+    parser.add_argument("--metrics-file", type=Path)
     parser.add_argument("--ply-cap", type=int, default=300)
     parser.add_argument("--start-fen", default=chess.STARTING_FEN)
     arguments = parser.parse_args()
@@ -191,7 +268,7 @@ def main() -> None:
     if arguments.games <= 0 or arguments.stockfish_move_ms <= 0:
         raise SystemExit("games and stockfish-move-ms must be positive")
     for profile in tuple(item.strip() for item in arguments.profiles.split(",") if item.strip()):
-        if profile not in {"fast", "balanced", "safe"}:
+        if profile not in {"very_fast", "fast", "balanced", "safe"}:
             raise SystemExit(f"unknown profile: {profile}")
         print(f"\n{profile} profile")
         _report(run_profile(arguments, profile), arguments.reference_elo)

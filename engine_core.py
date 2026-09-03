@@ -53,7 +53,13 @@ class SearchStats:
     allocated_soft_ms: int = 0
     allocated_hard_ms: int = 0
     root_second_score: int = -INF
+    root_best_score: int = -INF
     stable_iterations: int = 0
+    best_move_changes: int = 0
+    root_urgency: int = 0
+    root_legal_moves: int = 0
+    root_checking_moves: int = 0
+    root_capturing_moves: int = 0
 
 
 class SearchEngine:
@@ -119,6 +125,10 @@ class SearchEngine:
         self._hard_deadline = start + budget.hard_ms / 1_000.0
         self.stats.allocated_soft_ms = budget.soft_ms
         self.stats.allocated_hard_ms = budget.hard_ms
+        self.stats.root_urgency = budget.signals.urgency
+        self.stats.root_legal_moves = budget.signals.legal_moves
+        self.stats.root_checking_moves = budget.signals.checking_moves
+        self.stats.root_capturing_moves = budget.signals.capturing_moves
 
         best_move = fallback
         best_score = -INF
@@ -138,8 +148,11 @@ class SearchEngine:
                 if move is not None:
                     best_move, best_score = move, score
                     self.stats.completed_depth = depth
+                    self.stats.root_best_score = best_score
                     self.stats.root_second_score = second_score
                     stable_iterations = stable_iterations + 1 if move == previous_move else 0
+                    if previous_move is not None and move != previous_move:
+                        self.stats.best_move_changes += 1
                     previous_move = move
                     self.stats.stable_iterations = stable_iterations
                 aspiration = min(300, aspiration + 8)
