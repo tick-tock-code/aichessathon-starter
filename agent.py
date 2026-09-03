@@ -57,7 +57,7 @@ def _nnue_side_to_move(board: chess.Board) -> int:
     return score if board.turn == chess.WHITE else -score
 
 
-def _emit_metrics(time_left_ms: int, source: str) -> None:
+def _emit_metrics(time_left_ms: int, source: str, board: chess.Board, move: chess.Move) -> None:
     """Write developer telemetry to stderr via the local harness, when requested."""
     if os.environ.get("CHESSATHON_METRICS") != "1":
         return
@@ -65,6 +65,8 @@ def _emit_metrics(time_left_ms: int, source: str) -> None:
     payload = {
         "profile": TIME_MANAGER.profile,
         "source": source,
+        "fen": board.fen(),
+        "move": move.uci(),
         "time_left_ms": time_left_ms,
         "elapsed_ms": stats.elapsed_ms if source == "search" else 0,
         "allocated_soft_ms": stats.allocated_soft_ms if source == "search" else 0,
@@ -82,6 +84,7 @@ def _emit_metrics(time_left_ms: int, source: str) -> None:
         "root_legal_moves": stats.root_legal_moves if source == "search" else 0,
         "root_checking_moves": stats.root_checking_moves if source == "search" else 0,
         "root_capturing_moves": stats.root_capturing_moves if source == "search" else 0,
+        "root_scores_verified": stats.root_scores_verified if source == "search" else False,
     }
     print("CHESSATHON_METRIC " + json.dumps(payload, separators=(",", ":"), sort_keys=True))
 
@@ -91,6 +94,7 @@ SEARCH = SearchEngine(
     policy=POLICY.score_moves if POLICY.enabled else None,
     policy_max_ply=0,
     time_manager=TIME_MANAGER,
+    verify_root_scores=os.environ.get("CHESSATHON_VERIFY_ROOT") == "1",
 )
 TOKEN_POLICY = SquareTokenPolicy()
 EXPERTS = PhaseExpertRouter()
@@ -197,5 +201,5 @@ def get_move(fen: str, time_left_ms: int) -> str:
         move = SEARCH.choose_move(board, time_left_ms)
         source = "search"
     _start_pondering(board, move)
-    _emit_metrics(time_left_ms, source)
+    _emit_metrics(time_left_ms, source, board, move)
     return move.uci()

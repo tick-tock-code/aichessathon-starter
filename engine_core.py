@@ -60,6 +60,7 @@ class SearchStats:
     root_legal_moves: int = 0
     root_checking_moves: int = 0
     root_capturing_moves: int = 0
+    root_scores_verified: bool = False
 
 
 class SearchEngine:
@@ -73,12 +74,14 @@ class SearchEngine:
         policy: PolicyScorer | None = None,
         policy_max_ply: int = 2,
         time_manager: TimeManager | None = None,
+        verify_root_scores: bool = False,
     ) -> None:
         self.table_limit = table_limit
         self.evaluator = evaluator or evaluate_for_side_to_move
         self.policy = policy
         self.policy_max_ply = max(0, policy_max_ply)
         self.time_manager = time_manager or TimeManager()
+        self.verify_root_scores = verify_root_scores
         self.tt: dict[PositionKey, TTEntry] = {}
         self.killers: list[list[chess.Move | None]] = [[None, None] for _ in range(MAX_PLY)]
         self.history: dict[tuple[bool, int, int], int] = {}
@@ -137,7 +140,7 @@ class SearchEngine:
         aspiration = 45
         for depth in range(1, max_depth + 1):
             try:
-                if depth == 1:
+                if depth == 1 or self.verify_root_scores:
                     score, move, second_score = self._root_search(board, depth, -INF, INF)
                 else:
                     alpha = max(-INF, best_score - aspiration)
@@ -150,6 +153,7 @@ class SearchEngine:
                     self.stats.completed_depth = depth
                     self.stats.root_best_score = best_score
                     self.stats.root_second_score = second_score
+                    self.stats.root_scores_verified = self.verify_root_scores
                     stable_iterations = stable_iterations + 1 if move == previous_move else 0
                     if previous_move is not None and move != previous_move:
                         self.stats.best_move_changes += 1
@@ -159,11 +163,12 @@ class SearchEngine:
                 if abs(best_score) >= MATE - MAX_PLY:
                     break
                 elapsed_ms = int((perf_counter() - start) * 1_000)
+                score_gap = max(0, best_score - second_score) if self.verify_root_scores else 0
                 if self._at_or_past_soft_deadline() and TimeManager.should_stop_after_iteration(
                     elapsed_ms,
                     budget,
                     stable_iterations,
-                    max(0, best_score - second_score),
+                    score_gap,
                     abs(best_score) >= MATE - MAX_PLY,
                 ):
                     break
@@ -187,7 +192,7 @@ class SearchEngine:
         for index, move in enumerate(moves):
             board.push(move)
             try:
-                if index == 0:
+                if index == 0 or self.verify_root_scores:
                     score = -self._search(board, depth - 1, -beta, -alpha, 1, True)
                 else:
                     # Principal variation search: cheap zero-window test before a full re-search.
