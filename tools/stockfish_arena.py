@@ -202,6 +202,8 @@ def _metrics_from_stderr(stderr: str) -> list[dict[str, object]]:
 
 def run_profile(arguments: argparse.Namespace, profile: str) -> ScoreSummary:
     os.environ["CHESSATHON_TIME_PROFILE"] = profile
+    os.environ["CHESSATHON_TIME_SCALE"] = str(arguments.time_scale)
+    os.environ["CHESSATHON_SELECTIVITY"] = arguments.selectivity
     if arguments.metrics_file is not None:
         os.environ["CHESSATHON_METRICS"] = "1"
     else:
@@ -225,6 +227,7 @@ def run_profile(arguments: argparse.Namespace, profile: str) -> ScoreSummary:
         )
         for record in _metrics_from_stderr(ours.stderr_tail):
             record["profile"] = profile
+            record["variant"] = arguments.label or profile
             record["game"] = game + 1
             metrics.add(record)
             if arguments.metrics_file is not None:
@@ -260,12 +263,17 @@ def main() -> None:
     parser.add_argument("--reference-elo", type=int)
     parser.add_argument("--profiles", default="very_fast,fast,balanced")
     parser.add_argument("--metrics-file", type=Path)
+    parser.add_argument("--time-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--selectivity", choices=("profile", "aggressive", "safe"), default="profile"
+    )
+    parser.add_argument("--label")
     parser.add_argument("--ply-cap", type=int, default=300)
     parser.add_argument("--start-fen", default=chess.STARTING_FEN)
     arguments = parser.parse_args()
     if not arguments.stockfish.is_file():
         raise SystemExit(f"Stockfish executable not found: {arguments.stockfish}")
-    if arguments.games <= 0 or arguments.stockfish_move_ms <= 0:
+    if arguments.games <= 0 or arguments.stockfish_move_ms <= 0 or arguments.time_scale <= 0:
         raise SystemExit("games and stockfish-move-ms must be positive")
     for profile in tuple(item.strip() for item in arguments.profiles.split(",") if item.strip()):
         if profile not in {"very_fast", "fast", "balanced", "safe"}:

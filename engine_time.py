@@ -7,6 +7,7 @@ searcher readable.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import chess
@@ -124,6 +125,17 @@ class TimeManager:
         self.profile = (
             profile if profile in {"very_fast", "fast", "balanced", "safe"} else "balanced"
         )
+        try:
+            requested_scale = float(os.environ.get("CHESSATHON_TIME_SCALE", "1.0"))
+        except ValueError:
+            requested_scale = 1.0
+        self.time_scale = max(0.25, min(1.5, requested_scale))
+        requested_selectivity = os.environ.get("CHESSATHON_SELECTIVITY", "profile")
+        self.selectivity_override = (
+            requested_selectivity
+            if requested_selectivity in {"profile", "aggressive", "safe"}
+            else "profile"
+        )
 
     def initial_budget(self, board: chess.Board, time_left_ms: int) -> TimeBudget:
         signals = self.root_signals(board)
@@ -145,7 +157,7 @@ class TimeManager:
             profile_factor = 1.0 if signals.urgency >= 3 else 0.80
         else:
             profile_factor = 1.22
-        soft = int(base * phase_factor * tactical_factor * profile_factor)
+        soft = int(base * phase_factor * tactical_factor * profile_factor * self.time_scale)
         soft = max(self.minimum_ms, min(self.maximum_soft_ms, soft, spendable))
         # A hard limit leaves room for an unstable principal variation to be
         # verified, but it is always below the remaining game clock.
@@ -159,6 +171,10 @@ class TimeManager:
             selectivity = SearchSelectivity(3, 3, 2, 3, 2, 100, 110, 7)
         elif self.profile == "safe":
             selectivity = SearchSelectivity(4, 7, 1, 4, 2, 165, 170, 10)
+        if self.selectivity_override == "aggressive":
+            selectivity = SearchSelectivity(3, 2, 2, 3, 2, 75, 85, 6)
+        elif self.selectivity_override == "safe":
+            selectivity = SearchSelectivity(4, 8, 1, 4, 2, 175, 180, 10)
         return TimeBudget(soft, hard, signals, selectivity)
 
     @staticmethod

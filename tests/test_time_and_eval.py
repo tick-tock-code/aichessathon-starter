@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import chess
 import numpy as np
@@ -54,6 +55,16 @@ class TimeManagerTests(unittest.TestCase):
                 budget.soft_ms, budget, stable_iterations=2, score_gap=35, mate_detected=False
             )
         )
+
+    def test_developer_ablation_overrides_are_bounded_and_separate(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"CHESSATHON_TIME_SCALE": "0.5", "CHESSATHON_SELECTIVITY": "safe"},
+        ):
+            budget = TimeManager("balanced").initial_budget(chess.Board(), 30_000)
+        self.assertEqual(TimeManager("balanced").time_scale, 1.0)
+        self.assertEqual(budget.selectivity.lmr_max_reduction, 1)
+        self.assertEqual(budget.selectivity.qdepth_limit, 10)
         self.assertFalse(
             TimeManager.should_stop_after_iteration(
                 budget.soft_ms, budget, stable_iterations=0, score_gap=0, mate_detected=False

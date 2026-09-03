@@ -64,6 +64,8 @@ def _emit_metrics(time_left_ms: int, source: str, board: chess.Board, move: ches
     stats = SEARCH.stats
     payload = {
         "profile": TIME_MANAGER.profile,
+        "time_scale": TIME_MANAGER.time_scale,
+        "selectivity": TIME_MANAGER.selectivity_override,
         "source": source,
         "fen": board.fen(),
         "move": move.uci(),
