@@ -176,12 +176,12 @@ class SearchEngine:
             budget = self.time_manager.initial_budget(board, time_left_ms)
         else:
             allocation = max(1, min(move_time_ms, max(1, time_left_ms - 10)))
-            signals = self.time_manager.root_signals(board)
+            automatic_budget = self.time_manager.initial_budget(board, time_left_ms)
             budget = TimeBudget(
                 allocation,
                 allocation,
-                signals,
-                self.time_manager.selectivity_for(time_left_ms, signals.urgency),
+                automatic_budget.signals,
+                automatic_budget.selectivity,
             )
         self._selectivity = budget.selectivity
         self._deadline = start + budget.soft_ms / 1_000.0
@@ -269,6 +269,28 @@ class SearchEngine:
                 break
         self.stats.elapsed_ms = int((perf_counter() - start) * 1_000)
         return best_move
+
+    def absorb_pondered_search(self, pondered: SearchEngine) -> None:
+        """Merge stopped ponder data before foreground search resumes.
+
+        Callers must stop and join the ponder worker before invoking this method.
+        Only immutable table entries and independent ordering values are copied;
+        no board, deadline, cancellation state, or active search stack is shared.
+        """
+        if pondered is self:
+            return
+        for key, entry in pondered.tt.items():
+            current = self.tt.get(key)
+            if current is None or entry.depth > current.depth:
+                self._store(key, TTEntry(entry.depth, entry.score, entry.flag, entry.best_move))
+        for key, value in pondered.history.items():
+            self.history[key] = max(self.history.get(key, 0), value)
+        for ply, killers in enumerate(pondered.killers):
+            for move in killers:
+                if move is None or move in self.killers[ply]:
+                    continue
+                self.killers[ply][1] = self.killers[ply][0]
+                self.killers[ply][0] = move
 
     @staticmethod
     def _can_finish_next_iteration(

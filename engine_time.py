@@ -123,7 +123,9 @@ class TimeManager:
 
     def __init__(self, profile: str = "balanced") -> None:
         self.profile = (
-            profile if profile in {"very_fast", "fast", "balanced", "safe"} else "balanced"
+            profile
+            if profile in {"very_fast", "fast", "balanced", "safe", "long_aggressive"}
+            else "long_aggressive"
         )
         try:
             requested_scale = float(os.environ.get("CHESSATHON_TIME_SCALE", "1.0"))
@@ -191,6 +193,8 @@ class TimeManager:
             profile_factor = 0.50
         elif self.profile == "fast":
             profile_factor = 0.72
+        elif self.profile == "long_aggressive":
+            profile_factor = 1.0
         elif self.profile == "balanced":
             profile_factor = 1.0 if signals.urgency >= 3 else 0.80
         else:
@@ -201,7 +205,9 @@ class TimeManager:
         # verified, but it is always below the remaining game clock.
         hard = min(spendable, max(soft, int(soft * 1.55)))
         selectivity = self.selectivity_for(remaining, signals.urgency)
-        if self.profile == "very_fast" and signals.urgency < 4:
+        if self.profile == "long_aggressive":
+            selectivity = SearchSelectivity(3, 2, 2, 3, 2, 75, 85, 8)
+        elif self.profile == "very_fast" and signals.urgency < 4:
             selectivity = SearchSelectivity(3, 2, 2, 3, 2, 75, 85, 6)
         elif self.profile == "fast" and signals.urgency < 4:
             selectivity = SearchSelectivity(3, 3, 2, 3, 2, 95, 105, 7)

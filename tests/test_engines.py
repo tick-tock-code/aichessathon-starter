@@ -164,7 +164,8 @@ class OptionalComponentTests(unittest.TestCase):
         self.assertTrue(ponder.start_many(("first", "second", "third"), worker, max_branches=2))
         self.assertTrue(completed.wait(timeout=1.0))
         self.assertTrue(ponder.stop_for_timed_search(join_timeout_s=0.1))
-        self.assertEqual(calls, ["first", "second"])
+        self.assertEqual(calls[:2], ["first", "second"])
+        self.assertNotIn("third", calls)
         self.assertEqual(ponder.take("second"), "move-for-second")
         self.assertEqual(ponder.stats.cache_hits, 1)
 

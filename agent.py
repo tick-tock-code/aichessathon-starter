@@ -37,8 +37,10 @@ BOOK = PolyglotBook()
 TABLEBASES = SyzygyTablebases()
 PGN_TABLEBASES = PgnEndgameTablebase()
 HISTORY = PositionHistory()
-PONDER = PonderController(enabled=os.environ.get("CHESSATHON_PONDER") == "1")
-TIME_MANAGER = TimeManager(os.environ.get("CHESSATHON_TIME_PROFILE", "balanced").strip().lower())
+PONDER = PonderController(enabled=os.environ.get("CHESSATHON_PONDER", "1") != "0")
+TIME_MANAGER = TimeManager(
+    os.environ.get("CHESSATHON_TIME_PROFILE", "long_aggressive").strip().lower()
+)
 
 
 def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -50,6 +52,8 @@ def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int
 
 
 PONDER_BRANCHES: Final = _bounded_env_int("CHESSATHON_PONDER_BRANCHES", 3, 1, 4)
+PONDER_SLICE_MS: Final = _bounded_env_int("CHESSATHON_PONDER_SLICE_MS", 125, 40, 300)
+PONDER_SEARCHES: dict[str, SearchEngine] = {}
 
 
 def _nnue_side_to_move(board: chess.Board) -> int:
@@ -106,7 +110,7 @@ SEARCH = SearchEngine(
     policy_max_ply=0,
     time_manager=TIME_MANAGER,
     verify_root_scores=os.environ.get("CHESSATHON_VERIFY_ROOT") == "1",
-    time_manager_mode=os.environ.get("CHESSATHON_TIME_MANAGER", "legacy"),
+    time_manager_mode=os.environ.get("CHESSATHON_TIME_MANAGER", "guarded"),
 )
 TOKEN_POLICY = SquareTokenPolicy()
 EXPERTS = PhaseExpertRouter()
@@ -114,20 +118,46 @@ MCTS = PuctSearch(policy=TOKEN_POLICY.scores, value=EXPERTS.evaluate)
 IMPLICIT = ImplicitSearch(policy=TOKEN_POLICY, router=EXPERTS)
 
 
-def _ponder_worker(predicted_fen: str, stop: Event) -> str | None:
-    """Search one predicted reply on isolated state during the opponent's clock."""
+def _ponder_worker(predicted_fen: str, stop: Event) -> SearchEngine | None:
+    """Advance one cancellable slice of a predicted reply's isolated search."""
     if stop.is_set():
         return None
     board = chess.Board(predicted_fen)
     if board.is_game_over(claim_draw=True):
         return None
-    search = SearchEngine(table_limit=30_000)
-    move = search.choose_move(board, 5_000, move_time_ms=750, cancel=stop.is_set)
-    return None if stop.is_set() else move.uci()
+    search = PONDER_SEARCHES.get(predicted_fen)
+    if search is None:
+        search = SearchEngine(
+            table_limit=30_000,
+            evaluator=_nnue_side_to_move if NNUE.enabled else None,
+            time_manager=TIME_MANAGER,
+            time_manager_mode=SEARCH.time_manager_mode,
+        )
+        PONDER_SEARCHES[predicted_fen] = search
+    search.choose_move(board, 5_000, move_time_ms=PONDER_SLICE_MS, cancel=stop.is_set)
+    return None if stop.is_set() else search
+
+
+def _reply_priority(
+    board: chess.Board, move: chess.Move, recapture_square: chess.Square
+) -> tuple[int, int, int, str]:
+    """Rank plausible opponent replies without relying on an untrained policy."""
+    is_capture = board.is_capture(move)
+    victim = board.piece_at(move.to_square)
+    victim_value = 0 if victim is None else victim.piece_type
+    centrality = (
+        7 - abs(3 - chess.square_file(move.to_square)) - abs(3 - chess.square_rank(move.to_square))
+    )
+    return (
+        int(move.promotion is not None) * 10_000 + int(board.gives_check(move)) * 5_000,
+        int(is_capture) * 1_000 + int(move.to_square == recapture_square) * 500 + victim_value,
+        centrality,
+        move.uci(),
+    )
 
 
 def _start_pondering(board: chess.Board, our_move: chess.Move) -> None:
-    """Prepare responses to a small policy-ranked portfolio of opponent replies."""
+    """Continuously prepare a forcing, non-policy portfolio during opponent time."""
     if not PONDER.enabled:
         return
     after_our_move = board.copy(stack=False)
@@ -135,11 +165,10 @@ def _start_pondering(board: chess.Board, our_move: chess.Move) -> None:
     if after_our_move.is_game_over(claim_draw=True):
         return
     replies = list(after_our_move.legal_moves)
-    try:
-        scores = TOKEN_POLICY.scores(after_our_move, replies)
-        replies.sort(key=lambda move: (scores.get(move, float("-inf")), move.uci()), reverse=True)
-    except (RuntimeError, TypeError, ValueError, OverflowError):
-        replies.sort(key=chess.Move.uci)
+    replies.sort(
+        key=lambda move: _reply_priority(after_our_move, move, our_move.to_square), reverse=True
+    )
+    PONDER_SEARCHES.clear()
     predicted_fens: list[str] = []
     for opponent_move in replies[:PONDER_BRANCHES]:
         predicted = after_our_move.copy(stack=False)
@@ -175,8 +204,9 @@ def get_move(fen: str, time_left_ms: int) -> str:
         # explicitly makes malformed external calls easier to diagnose.
         raise ValueError("get_move called for a terminal position")
 
-    # Pondering is opt-in and currently disabled. This remains the foreground
-    # safety barrier if a future experiment enables it.
+    # Stop the sole background worker before foreground search touches any
+    # transferred table entries. An immediate opponent reply safely falls back
+    # to a normal search if the worker has not yielded yet.
     ponder_stopped = PONDER.stop_for_timed_search()
     HISTORY.observe(board)
 
@@ -184,14 +214,9 @@ def get_move(fen: str, time_left_ms: int) -> str:
     source = "search"
     if ponder_stopped:
         pondered = PONDER.take(board.fen())
-        if isinstance(pondered, str):
-            try:
-                candidate = chess.Move.from_uci(pondered)
-                move = candidate if candidate in legal_moves else None
-                if move is not None:
-                    source = "ponder"
-            except chess.InvalidMoveError:
-                move = None
+        if isinstance(pondered, SearchEngine):
+            SEARCH.absorb_pondered_search(pondered)
+            PONDER_SEARCHES.clear()
     if move is None:
         move = TABLEBASES.choose(board)
         if move is not None:

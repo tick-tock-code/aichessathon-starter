@@ -55,6 +55,11 @@ class TimeManagerTests(unittest.TestCase):
                 budget.soft_ms, budget, stable_iterations=2, score_gap=35, mate_detected=False
             )
         )
+        self.assertFalse(
+            TimeManager.should_stop_after_iteration(
+                budget.soft_ms, budget, stable_iterations=0, score_gap=0, mate_detected=False
+            )
+        )
 
     def test_developer_ablation_overrides_are_bounded_and_separate(self) -> None:
         with patch.dict(
@@ -78,11 +83,16 @@ class TimeManagerTests(unittest.TestCase):
     def test_balanced_quiet_default_uses_eight_ply_quiescence(self) -> None:
         budget = TimeManager("balanced").initial_budget(chess.Board(), 30_000)
         self.assertEqual(budget.selectivity.qdepth_limit, 8)
-        self.assertFalse(
-            TimeManager.should_stop_after_iteration(
-                budget.soft_ms, budget, stable_iterations=0, score_gap=0, mate_detected=False
-            )
-        )
+
+    def test_long_aggressive_profile_has_full_quiet_budget_and_qdepth_eight(self) -> None:
+        quiet = chess.Board()
+        long_budget = TimeManager("long_aggressive").initial_budget(quiet, 30_000)
+        balanced_budget = TimeManager("balanced").initial_budget(quiet, 30_000)
+        self.assertGreater(long_budget.soft_ms, balanced_budget.soft_ms)
+        self.assertEqual(long_budget.selectivity.lmr_move_number, 2)
+        self.assertEqual(long_budget.selectivity.futility_margin, 75)
+        self.assertEqual(long_budget.selectivity.delta_margin, 85)
+        self.assertEqual(long_budget.selectivity.qdepth_limit, 8)
 
 
 class PackedEvaluationTests(unittest.TestCase):

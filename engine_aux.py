@@ -298,16 +298,16 @@ class PonderStats:
     cache_hits: int = 0
     cache_misses: int = 0
     cancellations: int = 0
+    rounds_completed: int = 0
 
 
 class PonderController:
-    """Opt-in pondering with no shared boards, TT, or search state.
+    """Single-worker, cancellable pondering with immutable result hand-off.
 
-    It is deliberately disabled by default.  A worker receives only an immutable
-    FEN and a stop event; it must check the event regularly.  Before a timed
-    search the caller must call ``stop_for_timed_search``.  That join forms the
-    safety barrier: a completed result can be read, but an active worker cannot
-    mutate or race with the foreground search.
+    A worker receives only an immutable FEN and a stop event; it must check the
+    event regularly. Before foreground search, callers must stop and join it.
+    That join is the safety barrier that makes transferring a completed search
+    state safe on the single competition core.
     """
 
     def __init__(self, enabled: bool = False) -> None:
@@ -348,16 +348,23 @@ class PonderController:
             self._results.clear()
 
         def run() -> None:
-            for predicted_fen in unique_fens:
-                if self._stop.is_set():
-                    return
-                self.stats.branches_started += 1
-                value = worker(predicted_fen, self._stop)
-                if self._stop.is_set():
-                    return
-                with self._lock:
-                    self._results[predicted_fen] = PonderResult(predicted_fen, value)
-                    self.stats.branches_completed += 1
+            first_round = True
+            while not self._stop.is_set():
+                for predicted_fen in unique_fens:
+                    if self._stop.is_set():
+                        return
+                    if first_round:
+                        self.stats.branches_started += 1
+                    value = worker(predicted_fen, self._stop)
+                    if self._stop.is_set():
+                        return
+                    with self._lock:
+                        self._results[predicted_fen] = PonderResult(predicted_fen, value)
+                    if first_round:
+                        self.stats.branches_completed += 1
+                first_round = False
+                self.stats.rounds_completed += 1
+                self._stop.wait(0.001)
 
         self._thread = Thread(target=run, name="chess-ponder", daemon=True)
         self._thread.start()

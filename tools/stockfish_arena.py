@@ -316,7 +316,7 @@ def main() -> None:
     if arguments.games <= 0 or arguments.stockfish_move_ms <= 0 or arguments.time_scale <= 0:
         raise SystemExit("games and stockfish-move-ms must be positive")
     for profile in tuple(item.strip() for item in arguments.profiles.split(",") if item.strip()):
-        if profile not in {"very_fast", "fast", "balanced", "safe"}:
+        if profile not in {"very_fast", "fast", "balanced", "safe", "long_aggressive"}:
             raise SystemExit(f"unknown profile: {profile}")
         print(f"\n{profile} profile")
         _report(run_profile(arguments, profile), arguments.reference_elo)
