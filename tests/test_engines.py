@@ -16,6 +16,7 @@ from engine_aux import (
     position_key,
 )
 from engine_core import MATE, RootCandidate, RootSearchResult, SearchEngine
+from engine_eval import PIECE_VALUES
 from engine_experimental import (
     ImplicitSearch,
     PuctSearch,
@@ -66,6 +67,30 @@ class CoreSearchTests(unittest.TestCase):
         )
         self.assertEqual(result.bound_gap, 40)
         self.assertEqual(result.close_challengers(35), [])
+
+    def test_quiet_fork_cross_check_rejects_qd7(self) -> None:
+        board = chess.Board(
+            "2rqr1k1/1p3pb1/3pbnp1/p1pNp2p/2PnP3/P2PB1PP/1P2NPB1/2RQR1K1 b - - 4 16"
+        )
+        # The rated-game failure: ...Qd7 permits Nb6, attacking both queen and rook,
+        # while Stockfish's ...Nd5 does not.
+        risky = chess.Move.from_uci("d8d7")
+        safe = chess.Move.from_uci("f6d5")
+        self.assertGreaterEqual(
+            SearchEngine._quiet_fork_liability(board, risky), PIECE_VALUES[chess.ROOK]
+        )
+        self.assertLess(SearchEngine._quiet_fork_liability(board, safe), PIECE_VALUES[chess.ROOK])
+
+    def test_capturable_forker_is_not_treated_as_a_lost_rook(self) -> None:
+        board = chess.Board(
+            "r6k/1p1bn1b1/p3p2p/3pP3/P3q1P1/1P2Q2P/N1P2P2/4RRK1 w - - 7 32"
+        )
+        # After Qc5 the opposing queen can geometrically attack queen and rook,
+        # but our queen can trade it off.  That is not an unavoidable rook loss.
+        move = chess.Move.from_uci("e3c5")
+        self.assertLess(
+            SearchEngine._quiet_fork_liability(board, move), PIECE_VALUES[chess.ROOK]
+        )
 
 
 class OptionalComponentTests(unittest.TestCase):

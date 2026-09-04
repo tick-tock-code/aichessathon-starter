@@ -99,6 +99,9 @@ class MetricSummary:
                 "next_iteration_skipped",
                 "root_bound_gap",
                 "challenger_verifications",
+                "tactical_cross_checks",
+                "tactical_rejections",
+                "tactical_liability",
             }
         }
         formatted = ", ".join(f"{key}={value:.1f}" for key, value in sorted(averages.items()))

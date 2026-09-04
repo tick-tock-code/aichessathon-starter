@@ -68,6 +68,9 @@ class SearchStats:
     next_iteration_skipped: int = 0
     root_bound_gap: int = 0
     challenger_verifications: int = 0
+    tactical_cross_checks: int = 0
+    tactical_rejections: int = 0
+    tactical_liability: int = 0
     stop_reason: str = ""
 
 
@@ -131,6 +134,7 @@ class SearchEngine:
         policy_max_ply: int = 2,
         time_manager: TimeManager | None = None,
         verify_root_scores: bool = False,
+        tactical_root_verification: bool = True,
         time_manager_mode: str = "legacy",
     ) -> None:
         self.table_limit = table_limit
@@ -139,6 +143,7 @@ class SearchEngine:
         self.policy_max_ply = max(0, policy_max_ply)
         self.time_manager = time_manager or TimeManager()
         self.verify_root_scores = verify_root_scores
+        self.tactical_root_verification = tactical_root_verification
         self.time_manager_mode = (
             time_manager_mode if time_manager_mode in {"legacy", "guarded"} else "legacy"
         )
@@ -148,6 +153,7 @@ class SearchEngine:
         self.stats = SearchStats()
         self._deadline = 0.0
         self._hard_deadline = 0.0
+        self._move_deadline = 0.0
         self._cancel: CancelCheck | None = None
         self._selectivity = SearchSelectivity(3, 4, 2, 3, 2, 110, 120, 8)
 
@@ -185,7 +191,11 @@ class SearchEngine:
             )
         self._selectivity = budget.selectivity
         self._deadline = start + budget.soft_ms / 1_000.0
-        self._hard_deadline = start + budget.hard_ms / 1_000.0
+        self._move_deadline = start + budget.hard_ms / 1_000.0
+        # Preserve a very small part of the existing allocation for a static root
+        # cross-check.  It is intentionally bounded so the verifier cannot cause a flag.
+        verifier_reserve_ms = min(25, max(3, budget.hard_ms // 100))
+        self._hard_deadline = self._move_deadline - verifier_reserve_ms / 1_000.0
         self.stats.allocated_soft_ms = budget.soft_ms
         self.stats.allocated_hard_ms = budget.hard_ms
         self.stats.root_urgency = budget.signals.urgency
@@ -196,6 +206,7 @@ class SearchEngine:
         best_move = fallback
         best_score = -INF
         previous_move: chess.Move | None = None
+        recent_distinct_moves: list[chess.Move] = []
         stable_iterations = 0
         last_iteration_ms = 0
         aspiration = 45
@@ -224,6 +235,9 @@ class SearchEngine:
                         result = self._root_search(board, depth, -INF, INF)
                 score, move, second_score = result.score, result.move, result.second_score
                 if move is not None:
+                    if not recent_distinct_moves or move != recent_distinct_moves[-1]:
+                        recent_distinct_moves.append(move)
+                        recent_distinct_moves = recent_distinct_moves[-3:]
                     best_move, best_score = move, score
                     self.stats.completed_depth = depth
                     self.stats.iterations_completed += 1
@@ -267,8 +281,107 @@ class SearchEngine:
                 self.stats.aborted_depth = depth
                 self.stats.stop_reason = "hard_deadline"
                 break
+        if (
+            self.tactical_root_verification
+            and self._cancel is None
+            and len(recent_distinct_moves) > 1
+            and perf_counter() < self._move_deadline
+        ):
+            best_move = self._cross_check_root_tactics(board, best_move, recent_distinct_moves)
         self.stats.elapsed_ms = int((perf_counter() - start) * 1_000)
         return best_move
+
+    def _cross_check_root_tactics(
+        self,
+        board: chess.Board,
+        selected: chess.Move,
+        recent_moves: list[chess.Move],
+    ) -> chess.Move:
+        """Reject a recently changed root move that permits a concrete quiet fork.
+
+        The normal search remains authoritative unless its selected move has at least a
+        minor-piece-sized liability and a recent iterative-deepening choice avoids it.
+        This catches horizon reversals without broadly extending quiescence or weakening
+        the tuned pruning profile.
+        """
+        candidates = list(dict.fromkeys([selected, *reversed(recent_moves)]))[:3]
+        liabilities: dict[chess.Move, int] = {}
+        for move in candidates:
+            if perf_counter() >= self._move_deadline:
+                break
+            liabilities[move] = self._quiet_fork_liability(board, move)
+            self.stats.tactical_cross_checks += 1
+        selected_liability = liabilities.get(selected, 0)
+        self.stats.tactical_liability = selected_liability
+        # Restrict automatic vetoes to a major-piece fork.  Minor-piece double
+        # attacks are common and often tactically answerable beyond this static probe.
+        if selected_liability < PIECE_VALUES[chess.ROOK]:
+            return selected
+        safer = min(liabilities, key=lambda move: (liabilities[move], move != selected))
+        if selected_liability - liabilities[safer] >= 150:
+            self.stats.tactical_rejections += 1
+            self.stats.tactical_liability = liabilities[safer]
+            return safer
+        return selected
+
+    @staticmethod
+    def _quiet_fork_liability(board: chess.Board, root_move: chess.Move) -> int:
+        """Estimate material that a single quiet opponent fork makes unavoidable."""
+        if root_move not in board.legal_moves:
+            return INF
+        root_color = board.turn
+        board.push(root_move)
+        try:
+            worst = 0
+            for reply in board.legal_moves:
+                if board.is_capture(reply) or reply.promotion is not None:
+                    continue
+                board.push(reply)
+                try:
+                    if board.is_checkmate():
+                        return MATE
+                    attacker = board.piece_at(reply.to_square)
+                    if attacker is None or board.is_pinned(not root_color, reply.to_square):
+                        continue
+                    attacked_values = sorted(
+                        (
+                            PIECE_VALUES[piece.piece_type]
+                            for square in board.attacks(reply.to_square)
+                            if (piece := board.piece_at(square)) is not None
+                            and piece.color == root_color
+                            and piece.piece_type != chess.KING
+                        ),
+                        reverse=True,
+                    )
+                    if len(attacked_values) < 2:
+                        continue
+                    # An undefended forking piece can simply be removed.  If it is defended,
+                    # saving the most valuable target still concedes the second one.
+                    capturer_values = [
+                        PIECE_VALUES[piece.piece_type]
+                        for move in board.legal_moves
+                        if move.to_square == reply.to_square
+                        and board.is_capture(move)
+                        and (piece := board.piece_at(move.from_square)) is not None
+                    ]
+                    defended = board.is_attacked_by(not root_color, reply.to_square)
+                    fork_cost = attacked_values[1]
+                    if capturer_values:
+                        # Capturing an undefended forker costs nothing.  Against a defended
+                        # forker, the material cost of the exchange can still be much smaller
+                        # than conceding either target (for example queen takes queen).
+                        exchange_cost = (
+                            max(0, min(capturer_values) - PIECE_VALUES[attacker.piece_type])
+                            if defended
+                            else 0
+                        )
+                        fork_cost = min(fork_cost, exchange_cost)
+                    worst = max(worst, fork_cost)
+                finally:
+                    board.pop()
+            return worst
+        finally:
+            board.pop()
 
     def absorb_pondered_search(self, pondered: SearchEngine) -> None:
         """Merge stopped ponder data before foreground search resumes.

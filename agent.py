@@ -99,6 +99,9 @@ def _emit_metrics(time_left_ms: int, source: str, board: chess.Board, move: ches
         "next_iteration_skipped": stats.next_iteration_skipped if source == "search" else 0,
         "root_bound_gap": stats.root_bound_gap if source == "search" else 0,
         "challenger_verifications": stats.challenger_verifications if source == "search" else 0,
+        "tactical_cross_checks": stats.tactical_cross_checks if source == "search" else 0,
+        "tactical_rejections": stats.tactical_rejections if source == "search" else 0,
+        "tactical_liability": stats.tactical_liability if source == "search" else 0,
         "stop_reason": stats.stop_reason if source == "search" else "",
     }
     print("CHESSATHON_METRIC " + json.dumps(payload, separators=(",", ":"), sort_keys=True))
@@ -110,6 +113,7 @@ SEARCH = SearchEngine(
     policy_max_ply=0,
     time_manager=TIME_MANAGER,
     verify_root_scores=os.environ.get("CHESSATHON_VERIFY_ROOT") == "1",
+    tactical_root_verification=os.environ.get("CHESSATHON_TACTICAL_VERIFY", "1") != "0",
     time_manager_mode=os.environ.get("CHESSATHON_TIME_MANAGER", "guarded"),
 )
 TOKEN_POLICY = SquareTokenPolicy()
