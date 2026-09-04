@@ -206,7 +206,7 @@ class TimeManager:
         elif self.profile == "fast" and signals.urgency < 4:
             selectivity = SearchSelectivity(3, 3, 2, 3, 2, 95, 105, 7)
         elif self.profile == "balanced" and signals.urgency < 3:
-            selectivity = SearchSelectivity(3, 3, 2, 3, 2, 100, 110, 7)
+            selectivity = SearchSelectivity(3, 3, 2, 3, 2, 100, 110, 8)
         elif self.profile == "safe":
             selectivity = SearchSelectivity(4, 7, 1, 4, 2, 165, 170, 10)
         if self.selectivity_override == "aggressive":

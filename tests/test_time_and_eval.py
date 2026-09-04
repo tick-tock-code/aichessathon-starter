@@ -74,6 +74,10 @@ class TimeManagerTests(unittest.TestCase):
             budget = TimeManager("balanced").initial_budget(chess.Board(), 30_000)
         self.assertEqual(budget.selectivity.lmr_move_number, 4)
         self.assertEqual(budget.selectivity.qdepth_limit, 8)
+
+    def test_balanced_quiet_default_uses_eight_ply_quiescence(self) -> None:
+        budget = TimeManager("balanced").initial_budget(chess.Board(), 30_000)
+        self.assertEqual(budget.selectivity.qdepth_limit, 8)
         self.assertFalse(
             TimeManager.should_stop_after_iteration(
                 budget.soft_ms, budget, stable_iterations=0, score_gap=0, mate_detected=False
