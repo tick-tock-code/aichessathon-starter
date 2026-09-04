@@ -137,6 +137,44 @@ class TimeManager:
             else "profile"
         )
 
+    @staticmethod
+    def _env_selectivity_int(name: str, default: int, minimum: int, maximum: int) -> int:
+        """Read a bounded developer-only pruning override without changing defaults."""
+        try:
+            value = int(os.environ.get(name, str(default)))
+        except ValueError:
+            return default
+        return max(minimum, min(maximum, value))
+
+    def _apply_selectivity_overrides(self, selectivity: SearchSelectivity) -> SearchSelectivity:
+        """Apply explicit local-tuning values after choosing a coherent base preset."""
+        return SearchSelectivity(
+            self._env_selectivity_int(
+                "CHESSATHON_LMR_MIN_DEPTH", selectivity.lmr_min_depth, 1, 12
+            ),
+            self._env_selectivity_int(
+                "CHESSATHON_LMR_MOVE_NUMBER", selectivity.lmr_move_number, 1, 32
+            ),
+            self._env_selectivity_int(
+                "CHESSATHON_LMR_MAX_REDUCTION", selectivity.lmr_max_reduction, 0, 4
+            ),
+            self._env_selectivity_int(
+                "CHESSATHON_NULL_MIN_DEPTH", selectivity.null_min_depth, 1, 12
+            ),
+            self._env_selectivity_int(
+                "CHESSATHON_NULL_BASE_REDUCTION", selectivity.null_base_reduction, 1, 4
+            ),
+            self._env_selectivity_int(
+                "CHESSATHON_FUTILITY_MARGIN", selectivity.futility_margin, 0, 300
+            ),
+            self._env_selectivity_int(
+                "CHESSATHON_DELTA_MARGIN", selectivity.delta_margin, 0, 300
+            ),
+            self._env_selectivity_int(
+                "CHESSATHON_QDEPTH_LIMIT", selectivity.qdepth_limit, 1, 16
+            ),
+        )
+
     def initial_budget(self, board: chess.Board, time_left_ms: int) -> TimeBudget:
         signals = self.root_signals(board)
         remaining = max(1, time_left_ms)
@@ -175,7 +213,7 @@ class TimeManager:
             selectivity = SearchSelectivity(3, 2, 2, 3, 2, 75, 85, 6)
         elif self.selectivity_override == "safe":
             selectivity = SearchSelectivity(4, 8, 1, 4, 2, 175, 180, 10)
-        return TimeBudget(soft, hard, signals, selectivity)
+        return TimeBudget(soft, hard, signals, self._apply_selectivity_overrides(selectivity))
 
     @staticmethod
     def should_stop_after_iteration(

@@ -65,6 +65,15 @@ class TimeManagerTests(unittest.TestCase):
         self.assertEqual(TimeManager("balanced").time_scale, 1.0)
         self.assertEqual(budget.selectivity.lmr_max_reduction, 1)
         self.assertEqual(budget.selectivity.qdepth_limit, 10)
+
+    def test_per_knob_selectivity_override_applies_after_preset(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"CHESSATHON_LMR_MOVE_NUMBER": "4", "CHESSATHON_QDEPTH_LIMIT": "8"},
+        ):
+            budget = TimeManager("balanced").initial_budget(chess.Board(), 30_000)
+        self.assertEqual(budget.selectivity.lmr_move_number, 4)
+        self.assertEqual(budget.selectivity.qdepth_limit, 8)
         self.assertFalse(
             TimeManager.should_stop_after_iteration(
                 budget.soft_ms, budget, stable_iterations=0, score_gap=0, mate_detected=False

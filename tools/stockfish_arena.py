@@ -26,6 +26,17 @@ if str(ROOT) not in sys.path:
 from harness.referee import FAILED_TERMINATIONS, Outcome, play_match
 from harness.sandbox import AgentFailure, local
 
+SELECTIVITY_ENV = {
+    "lmr_min_depth": "CHESSATHON_LMR_MIN_DEPTH",
+    "lmr_move_number": "CHESSATHON_LMR_MOVE_NUMBER",
+    "lmr_max_reduction": "CHESSATHON_LMR_MAX_REDUCTION",
+    "null_min_depth": "CHESSATHON_NULL_MIN_DEPTH",
+    "null_base_reduction": "CHESSATHON_NULL_BASE_REDUCTION",
+    "futility_margin": "CHESSATHON_FUTILITY_MARGIN",
+    "delta_margin": "CHESSATHON_DELTA_MARGIN",
+    "qdepth_limit": "CHESSATHON_QDEPTH_LIMIT",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class ScoreSummary:
@@ -207,11 +218,30 @@ def _metrics_from_stderr(stderr: str) -> list[dict[str, object]]:
     return records
 
 
+def _set_selectivity_parameters(raw: str) -> None:
+    """Translate a small, validated CLI tuning string into child-process environment."""
+    for variable in SELECTIVITY_ENV.values():
+        os.environ.pop(variable, None)
+    if not raw:
+        return
+    for assignment in raw.split(","):
+        key, separator, value = assignment.partition("=")
+        variable = SELECTIVITY_ENV.get(key.strip())
+        if not separator or variable is None:
+            raise SystemExit(f"invalid selectivity parameter: {assignment}")
+        try:
+            int(value)
+        except ValueError as error:
+            raise SystemExit(f"selectivity parameter must be an integer: {assignment}") from error
+        os.environ[variable] = value.strip()
+
+
 def run_profile(arguments: argparse.Namespace, profile: str) -> ScoreSummary:
     os.environ["CHESSATHON_TIME_PROFILE"] = profile
     os.environ["CHESSATHON_TIME_SCALE"] = str(arguments.time_scale)
     os.environ["CHESSATHON_SELECTIVITY"] = arguments.selectivity
     os.environ["CHESSATHON_TIME_MANAGER"] = arguments.time_manager
+    _set_selectivity_parameters(arguments.selectivity_params)
     if arguments.metrics_file is not None:
         os.environ["CHESSATHON_METRICS"] = "1"
     else:
@@ -277,6 +307,7 @@ def main() -> None:
     )
     parser.add_argument("--label")
     parser.add_argument("--time-manager", choices=("legacy", "guarded"), default="legacy")
+    parser.add_argument("--selectivity-params", default="")
     parser.add_argument("--ply-cap", type=int, default=300)
     parser.add_argument("--start-fen", default=chess.STARTING_FEN)
     arguments = parser.parse_args()
