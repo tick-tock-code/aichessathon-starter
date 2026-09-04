@@ -81,6 +81,13 @@ class MetricSummary:
                 "root_legal_moves",
                 "root_checking_moves",
                 "root_capturing_moves",
+                "iterations_started",
+                "iterations_completed",
+                "aborted_depth",
+                "last_iteration_ms",
+                "next_iteration_skipped",
+                "root_bound_gap",
+                "challenger_verifications",
             }
         }
         formatted = ", ".join(f"{key}={value:.1f}" for key, value in sorted(averages.items()))
@@ -204,6 +211,7 @@ def run_profile(arguments: argparse.Namespace, profile: str) -> ScoreSummary:
     os.environ["CHESSATHON_TIME_PROFILE"] = profile
     os.environ["CHESSATHON_TIME_SCALE"] = str(arguments.time_scale)
     os.environ["CHESSATHON_SELECTIVITY"] = arguments.selectivity
+    os.environ["CHESSATHON_TIME_MANAGER"] = arguments.time_manager
     if arguments.metrics_file is not None:
         os.environ["CHESSATHON_METRICS"] = "1"
     else:
@@ -268,6 +276,7 @@ def main() -> None:
         "--selectivity", choices=("profile", "aggressive", "safe"), default="profile"
     )
     parser.add_argument("--label")
+    parser.add_argument("--time-manager", choices=("legacy", "guarded"), default="legacy")
     parser.add_argument("--ply-cap", type=int, default=300)
     parser.add_argument("--start-fen", default=chess.STARTING_FEN)
     arguments = parser.parse_args()

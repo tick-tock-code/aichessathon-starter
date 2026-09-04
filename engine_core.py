@@ -61,6 +61,62 @@ class SearchStats:
     root_checking_moves: int = 0
     root_capturing_moves: int = 0
     root_scores_verified: bool = False
+    iterations_started: int = 0
+    iterations_completed: int = 0
+    aborted_depth: int = 0
+    last_iteration_ms: int = 0
+    next_iteration_skipped: int = 0
+    root_bound_gap: int = 0
+    challenger_verifications: int = 0
+    stop_reason: str = ""
+
+
+@dataclass(slots=True)
+class RootCandidate:
+    """One root move's score and the strongest bound known for it."""
+
+    move: chess.Move
+    score: int
+    upper_bound: int
+    exact: bool
+
+
+@dataclass(slots=True)
+class RootSearchResult:
+    """Completed root-search result, including challenger bounds for clock policy."""
+
+    score: int
+    move: chess.Move | None
+    second_score: int
+    candidates: list[RootCandidate]
+    complete: bool
+
+    @property
+    def bound_gap(self) -> int:
+        """Proved separation from the strongest alternative, or zero if unknown."""
+        if not self.complete or self.move is None:
+            return 0
+        selected = next((item for item in self.candidates if item.move == self.move), None)
+        if selected is None or not selected.exact:
+            return 0
+        alternatives = [item.upper_bound for item in self.candidates if item.move != self.move]
+        if not alternatives:
+            return INF
+        return max(0, self.score - max(alternatives))
+
+    def close_challengers(self, margin: int) -> list[RootCandidate]:
+        """Return alternatives whose upper bound can still challenge the best move."""
+        if self.move is None:
+            return []
+        return sorted(
+            (
+                item
+                for item in self.candidates
+                if item.move != self.move and item.upper_bound >= self.score - margin
+            ),
+            key=lambda item: (item.upper_bound, item.move.uci()),
+            reverse=True,
+        )
 
 
 class SearchEngine:
@@ -75,6 +131,7 @@ class SearchEngine:
         policy_max_ply: int = 2,
         time_manager: TimeManager | None = None,
         verify_root_scores: bool = False,
+        time_manager_mode: str = "legacy",
     ) -> None:
         self.table_limit = table_limit
         self.evaluator = evaluator or evaluate_for_side_to_move
@@ -82,6 +139,9 @@ class SearchEngine:
         self.policy_max_ply = max(0, policy_max_ply)
         self.time_manager = time_manager or TimeManager()
         self.verify_root_scores = verify_root_scores
+        self.time_manager_mode = (
+            time_manager_mode if time_manager_mode in {"legacy", "guarded"} else "legacy"
+        )
         self.tt: dict[PositionKey, TTEntry] = {}
         self.killers: list[list[chess.Move | None]] = [[None, None] for _ in range(MAX_PLY)]
         self.history: dict[tuple[bool, int, int], int] = {}
@@ -137,23 +197,42 @@ class SearchEngine:
         best_score = -INF
         previous_move: chess.Move | None = None
         stable_iterations = 0
+        last_iteration_ms = 0
         aspiration = 45
         for depth in range(1, max_depth + 1):
+            elapsed_before_iteration = int((perf_counter() - start) * 1_000)
+            if (
+                self.time_manager_mode == "guarded"
+                and depth >= 3
+                and not self._can_finish_next_iteration(
+                    elapsed_before_iteration, budget.hard_ms, last_iteration_ms
+                )
+            ):
+                self.stats.next_iteration_skipped += 1
+                self.stats.stop_reason = "next_iteration_would_timeout"
+                break
+            iteration_start = perf_counter()
+            self.stats.iterations_started += 1
             try:
                 if depth == 1 or self.verify_root_scores:
-                    score, move, second_score = self._root_search(board, depth, -INF, INF)
+                    result = self._root_search(board, depth, -INF, INF)
                 else:
                     alpha = max(-INF, best_score - aspiration)
                     beta = min(INF, best_score + aspiration)
-                    score, move, second_score = self._root_search(board, depth, alpha, beta)
-                    if score <= alpha or score >= beta:
-                        score, move, second_score = self._root_search(board, depth, -INF, INF)
+                    result = self._root_search(board, depth, alpha, beta)
+                    if result.score <= alpha or result.score >= beta:
+                        result = self._root_search(board, depth, -INF, INF)
+                score, move, second_score = result.score, result.move, result.second_score
                 if move is not None:
                     best_move, best_score = move, score
                     self.stats.completed_depth = depth
+                    self.stats.iterations_completed += 1
+                    last_iteration_ms = int((perf_counter() - iteration_start) * 1_000)
+                    self.stats.last_iteration_ms = last_iteration_ms
                     self.stats.root_best_score = best_score
                     self.stats.root_second_score = second_score
                     self.stats.root_scores_verified = self.verify_root_scores
+                    self.stats.root_bound_gap = result.bound_gap
                     stable_iterations = stable_iterations + 1 if move == previous_move else 0
                     if previous_move is not None and move != previous_move:
                         self.stats.best_move_changes += 1
@@ -161,25 +240,78 @@ class SearchEngine:
                     self.stats.stable_iterations = stable_iterations
                 aspiration = min(300, aspiration + 8)
                 if abs(best_score) >= MATE - MAX_PLY:
+                    self.stats.stop_reason = "mate"
                     break
                 elapsed_ms = int((perf_counter() - start) * 1_000)
-                score_gap = max(0, best_score - second_score) if self.verify_root_scores else 0
-                if self._at_or_past_soft_deadline() and TimeManager.should_stop_after_iteration(
-                    elapsed_ms,
-                    budget,
-                    stable_iterations,
-                    score_gap,
-                    abs(best_score) >= MATE - MAX_PLY,
-                ):
-                    break
+                if self._at_or_past_soft_deadline():
+                    if self.time_manager_mode == "guarded":
+                        if stable_iterations >= 2 and result.bound_gap >= 35:
+                            self.stats.stop_reason = "proven_root_gap"
+                            break
+                        if stable_iterations >= 2 and self._verify_root_challengers(
+                            board, depth, result
+                        ):
+                            self.stats.root_bound_gap = result.bound_gap
+                            self.stats.stop_reason = "verified_root_gap"
+                            break
+                    elif TimeManager.should_stop_after_iteration(
+                        elapsed_ms,
+                        budget,
+                        stable_iterations,
+                        max(0, best_score - second_score) if self.verify_root_scores else 0,
+                        False,
+                    ):
+                        self.stats.stop_reason = "legacy_root_gap"
+                        break
             except SearchTimeout:
+                self.stats.aborted_depth = depth
+                self.stats.stop_reason = "hard_deadline"
                 break
         self.stats.elapsed_ms = int((perf_counter() - start) * 1_000)
         return best_move
 
+    @staticmethod
+    def _can_finish_next_iteration(
+        elapsed_ms: int, hard_ms: int, previous_iteration_ms: int
+    ) -> bool:
+        """Conservatively decide whether another completed depth can fit."""
+        projected_ms = max(20, int(previous_iteration_ms * 2.25))
+        return elapsed_ms + projected_ms + 10 < hard_ms
+
+    def _verify_root_challengers(
+        self, board: chess.Board, depth: int, result: RootSearchResult
+    ) -> bool:
+        """Spend a bounded post-soft slice proving only close root alternatives."""
+        if result.move is None or result.bound_gap >= 35:
+            return result.bound_gap >= 35
+        candidates = result.close_challengers(35)[:2]
+        if not candidates:
+            return False
+        remaining_ms = int((self._hard_deadline - perf_counter()) * 1_000)
+        cap_ms = min(200, max(25, remaining_ms // 3))
+        if cap_ms < 25:
+            return False
+        original_deadline = self._hard_deadline
+        self._hard_deadline = min(original_deadline, perf_counter() + cap_ms / 1_000.0)
+        try:
+            for candidate in candidates:
+                board.push(candidate.move)
+                try:
+                    candidate.score = -self._search(board, depth - 1, -INF, INF, 1, True)
+                    candidate.upper_bound = candidate.score
+                    candidate.exact = True
+                    self.stats.challenger_verifications += 1
+                finally:
+                    board.pop()
+        except SearchTimeout:
+            return False
+        finally:
+            self._hard_deadline = original_deadline
+        return result.bound_gap >= 35
+
     def _root_search(
         self, board: chess.Board, depth: int, alpha: int, beta: int
-    ) -> tuple[int, chess.Move | None, int]:
+    ) -> RootSearchResult:
         self._check_deadline()
         original_alpha = alpha
         key = self._key(board)
@@ -189,18 +321,27 @@ class SearchEngine:
         best_move: chess.Move | None = None
         best_score = -INF
         second_score = -INF
+        candidates: list[RootCandidate] = []
+        complete = True
         for index, move in enumerate(moves):
+            alpha_before = alpha
+            exact = index == 0 or self.verify_root_scores
             board.push(move)
             try:
-                if index == 0 or self.verify_root_scores:
+                if exact:
                     score = -self._search(board, depth - 1, -beta, -alpha, 1, True)
                 else:
                     # Principal variation search: cheap zero-window test before a full re-search.
                     score = -self._search(board, depth - 1, -alpha - 1, -alpha, 1, True)
                     if alpha < score < beta:
                         score = -self._search(board, depth - 1, -beta, -alpha, 1, True)
+                        exact = True
             finally:
                 board.pop()
+            if not (alpha_before < score < beta or (alpha_before == -INF and beta == INF)):
+                exact = False
+            upper_bound = score if exact or score <= alpha_before else INF
+            candidates.append(RootCandidate(move, score, upper_bound, exact))
             if score > best_score:
                 second_score = best_score
                 best_score, best_move = score, move
@@ -210,12 +351,13 @@ class SearchEngine:
                 alpha = score
             if alpha >= beta:
                 self.stats.cutoffs += 1
+                complete = False
                 break
         flag = "exact" if best_score > original_alpha and best_score < beta else "upper"
         if best_score >= beta:
             flag = "lower"
         self._store(key, TTEntry(depth, best_score, flag, best_move))
-        return best_score, best_move, second_score
+        return RootSearchResult(best_score, best_move, second_score, candidates, complete)
 
     def _search(
         self, board: chess.Board, depth: int, alpha: int, beta: int, ply: int, allow_null: bool

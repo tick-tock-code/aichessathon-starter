@@ -15,7 +15,7 @@ from engine_aux import (
     SyzygyTablebases,
     position_key,
 )
-from engine_core import MATE, SearchEngine
+from engine_core import MATE, RootCandidate, RootSearchResult, SearchEngine
 from engine_experimental import (
     ImplicitSearch,
     PuctSearch,
@@ -49,6 +49,23 @@ class CoreSearchTests(unittest.TestCase):
         self.assertEqual(engine.stats.allocated_soft_ms, 50)
         self.assertEqual(engine.stats.allocated_hard_ms, 50)
         self.assertGreaterEqual(engine.stats.completed_depth, 1)
+
+    def test_guard_predicts_when_another_depth_cannot_finish(self) -> None:
+        self.assertFalse(SearchEngine._can_finish_next_iteration(900, 1_000, 100))
+        self.assertTrue(SearchEngine._can_finish_next_iteration(100, 1_000, 100))
+
+    def test_root_bound_gap_requires_a_complete_exact_best_move(self) -> None:
+        best = chess.Move.from_uci("e2e4")
+        rival = chess.Move.from_uci("d2d4")
+        result = RootSearchResult(
+            50,
+            best,
+            0,
+            [RootCandidate(best, 50, 50, True), RootCandidate(rival, 0, 10, False)],
+            True,
+        )
+        self.assertEqual(result.bound_gap, 40)
+        self.assertEqual(result.close_challengers(35), [])
 
 
 class OptionalComponentTests(unittest.TestCase):

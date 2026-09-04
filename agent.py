@@ -66,6 +66,7 @@ def _emit_metrics(time_left_ms: int, source: str, board: chess.Board, move: ches
         "profile": TIME_MANAGER.profile,
         "time_scale": TIME_MANAGER.time_scale,
         "selectivity": TIME_MANAGER.selectivity_override,
+        "time_manager": SEARCH.time_manager_mode,
         "source": source,
         "fen": board.fen(),
         "move": move.uci(),
@@ -87,6 +88,14 @@ def _emit_metrics(time_left_ms: int, source: str, board: chess.Board, move: ches
         "root_checking_moves": stats.root_checking_moves if source == "search" else 0,
         "root_capturing_moves": stats.root_capturing_moves if source == "search" else 0,
         "root_scores_verified": stats.root_scores_verified if source == "search" else False,
+        "iterations_started": stats.iterations_started if source == "search" else 0,
+        "iterations_completed": stats.iterations_completed if source == "search" else 0,
+        "aborted_depth": stats.aborted_depth if source == "search" else 0,
+        "last_iteration_ms": stats.last_iteration_ms if source == "search" else 0,
+        "next_iteration_skipped": stats.next_iteration_skipped if source == "search" else 0,
+        "root_bound_gap": stats.root_bound_gap if source == "search" else 0,
+        "challenger_verifications": stats.challenger_verifications if source == "search" else 0,
+        "stop_reason": stats.stop_reason if source == "search" else "",
     }
     print("CHESSATHON_METRIC " + json.dumps(payload, separators=(",", ":"), sort_keys=True))
 
@@ -97,6 +106,7 @@ SEARCH = SearchEngine(
     policy_max_ply=0,
     time_manager=TIME_MANAGER,
     verify_root_scores=os.environ.get("CHESSATHON_VERIFY_ROOT") == "1",
+    time_manager_mode=os.environ.get("CHESSATHON_TIME_MANAGER", "legacy"),
 )
 TOKEN_POLICY = SquareTokenPolicy()
 EXPERTS = PhaseExpertRouter()
