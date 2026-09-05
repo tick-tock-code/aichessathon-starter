@@ -37,7 +37,9 @@ BOOK = PolyglotBook()
 TABLEBASES = SyzygyTablebases()
 PGN_TABLEBASES = PgnEndgameTablebase()
 HISTORY = PositionHistory()
-PONDER = PonderController(enabled=os.environ.get("CHESSATHON_PONDER", "1") != "0")
+# The frozen qualifier environment suspends our process while the opponent thinks,
+# so background pondering cannot make progress and only adds resume-time contention.
+PONDER = PonderController(enabled=os.environ.get("CHESSATHON_PONDER", "0") == "1")
 TIME_MANAGER = TimeManager(
     os.environ.get("CHESSATHON_TIME_PROFILE", "long_aggressive").strip().lower()
 )
