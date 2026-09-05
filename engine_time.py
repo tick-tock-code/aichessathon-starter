@@ -131,7 +131,10 @@ class TimeManager:
             requested_scale = float(os.environ.get("CHESSATHON_TIME_SCALE", "1.0"))
         except ValueError:
             requested_scale = 1.0
-        self.time_scale = max(0.25, min(1.5, requested_scale))
+        # Development sweeps may explore deliberately generous allocations.
+        # The competition clock still bounds every resulting budget below the
+        # remaining game time, so this cannot overrun the supplied clock.
+        self.time_scale = max(0.25, min(2.0, requested_scale))
         requested_selectivity = os.environ.get("CHESSATHON_SELECTIVITY", "profile")
         self.selectivity_override = (
             requested_selectivity
