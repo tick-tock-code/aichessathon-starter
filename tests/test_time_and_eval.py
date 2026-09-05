@@ -15,6 +15,7 @@ from engine_eval import (
     encode_white_perspective,
     evaluate_for_side_to_move,
     evaluate_white,
+    evaluate_white_v2,
 )
 from engine_time import TimeManager
 
@@ -96,6 +97,14 @@ class TimeManagerTests(unittest.TestCase):
 
 
 class PackedEvaluationTests(unittest.TestCase):
+    def test_strategic_evaluator_rewards_intact_king_shelter(self) -> None:
+        board = chess.Board("4q1kr/5p1p/8/6p1/8/8/5PPP/4Q1KR w - - 0 1")
+        self.assertGreater(evaluate_white_v2(board), evaluate_white(board))
+
+    def test_strategic_evaluator_is_colour_symmetric(self) -> None:
+        board = chess.Board("4q1kr/5p1p/8/6p1/8/8/5PPP/4Q1KR w - - 0 1")
+        self.assertEqual(evaluate_white_v2(board), -evaluate_white_v2(board.mirror()))
+
     def test_encoder_uses_signed_int8_piece_codes(self) -> None:
         board = chess.Board("8/8/8/8/8/8/4p3/4K3 w - - 0 1")
         encoded = encode_white_perspective(board)

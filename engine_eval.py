@@ -115,12 +115,145 @@ def _packed_score_impl(encoded: np.ndarray) -> int:
     return (middle_game * phase + end_game * (TOTAL_PHASE - phase)) // TOTAL_PHASE
 
 
+def _strategic_score_impl(encoded: np.ndarray) -> int:
+    """Return cheap structural and mobility terms from White's perspective."""
+    white_pawns = np.zeros(8, dtype=np.int8)
+    black_pawns = np.zeros(8, dtype=np.int8)
+    white_king = -1
+    black_king = -1
+    phase = 0
+    for square in range(64):
+        code = int(encoded[square])
+        if code == 0:
+            continue
+        piece = code if code > 0 else -code
+        phase += int(_PHASE[piece])
+        if piece == PAWN:
+            if code > 0:
+                white_pawns[square & 7] += 1
+            else:
+                black_pawns[square & 7] += 1
+        elif piece == KING:
+            if code > 0:
+                white_king = square
+            else:
+                black_king = square
+
+    score = 0
+    for file_index in range(8):
+        white_count = int(white_pawns[file_index])
+        black_count = int(black_pawns[file_index])
+        if white_count > 1:
+            score -= 10 * (white_count - 1)
+        if black_count > 1:
+            score += 10 * (black_count - 1)
+        white_neighbour = (file_index > 0 and white_pawns[file_index - 1] > 0) or (
+            file_index < 7 and white_pawns[file_index + 1] > 0
+        )
+        black_neighbour = (file_index > 0 and black_pawns[file_index - 1] > 0) or (
+            file_index < 7 and black_pawns[file_index + 1] > 0
+        )
+        if white_count and not white_neighbour:
+            score -= 8 * white_count
+        if black_count and not black_neighbour:
+            score += 8 * black_count
+
+    # King shelter matters while queens and major pieces remain. A pawn one rank
+    # ahead is best; a pawn two ranks ahead still gives partial cover.
+    if phase >= 8:
+        for king_square, sign, pawn_code, direction in (
+            (white_king, 1, PAWN, 1),
+            (black_king, -1, -PAWN, -1),
+        ):
+            if king_square < 0:
+                continue
+            king_file = king_square & 7
+            king_rank = king_square >> 3
+            for file_delta in (-1, 0, 1):
+                shield_file = king_file + file_delta
+                if shield_file < 0 or shield_file > 7:
+                    continue
+                near_rank = king_rank + direction
+                far_rank = king_rank + 2 * direction
+                if 0 <= near_rank <= 7 and encoded[near_rank * 8 + shield_file] == pawn_code:
+                    score += sign * 12
+                elif 0 <= far_rank <= 7 and encoded[far_rank * 8 + shield_file] == pawn_code:
+                    score += sign * 5
+                else:
+                    score -= sign * 10
+
+    # Reward rooks on files not blocked by their own pawns, especially fully open files.
+    for square in range(64):
+        code = int(encoded[square])
+        if code != ROOK and code != -ROOK:
+            continue
+        file_index = square & 7
+        if code > 0 and white_pawns[file_index] == 0:
+            score += 8 + (8 if black_pawns[file_index] == 0 else 0)
+        elif code < 0 and black_pawns[file_index] == 0:
+            score -= 8 + (8 if white_pawns[file_index] == 0 else 0)
+
+    # A bounded mobility term catches trapped pieces without generating legal moves.
+    knight_steps = (-17, -15, -10, -6, 6, 10, 15, 17)
+    for square in range(64):
+        code = int(encoded[square])
+        piece = code if code > 0 else -code
+        if piece < KNIGHT or piece > QUEEN:
+            continue
+        sign = 1 if code > 0 else -1
+        mobility = 0
+        if piece == KNIGHT:
+            source_file = square & 7
+            source_rank = square >> 3
+            for step in knight_steps:
+                target = square + step
+                if target < 0 or target >= 64:
+                    continue
+                file_change = abs((target & 7) - source_file)
+                rank_change = abs((target >> 3) - source_rank)
+                if file_change * rank_change != 2:
+                    continue
+                target_code = int(encoded[target])
+                if target_code == 0 or (target_code > 0) != (code > 0):
+                    mobility += 1
+            score += sign * 3 * mobility
+            continue
+        source_file = square & 7
+        for step in (-9, -8, -7, -1, 1, 7, 8, 9):
+            diagonal = step in (-9, -7, 7, 9)
+            if piece == BISHOP and not diagonal:
+                continue
+            if piece == ROOK and diagonal:
+                continue
+            target = square + step
+            previous_file = source_file
+            while 0 <= target < 64 and abs((target & 7) - previous_file) <= 1:
+                target_code = int(encoded[target])
+                if target_code == 0:
+                    mobility += 1
+                else:
+                    if (target_code > 0) != (code > 0):
+                        mobility += 1
+                    break
+                previous_file = target & 7
+                target += step
+        weight = 2 if piece in (BISHOP, ROOK) else 1
+        score += sign * weight * mobility
+    return score
+
+
 _packed_score: Callable[[np.ndarray], int]
 _numba_jit: Any | None = _numba
 _packed_score = (
     _packed_score_impl
     if _numba_jit is None
     else _numba_jit.njit(cache=False)(_packed_score_impl)
+)
+_strategic_score: Callable[[np.ndarray], int]
+_strategic_score = (
+    _strategic_score_impl
+    if _numba_jit is None
+    else _numba_jit.njit(cache=False)(_strategic_score_impl)
 )
 
 
@@ -143,14 +276,9 @@ def _python_packed_score(encoded: np.ndarray) -> int:
     return (middle_game * phase + end_game * (TOTAL_PHASE - phase)) // TOTAL_PHASE
 
 
-def evaluate_white(board: chess.Board) -> int:
-    """Return centipawns for White, including inexpensive positional terms."""
-    encoded = encode_white_perspective(board)
-    try:
-        score = int(_packed_score(encoded)) if NUMBA_AVAILABLE else _python_packed_score(encoded)
-    except Exception:  # pragma: no cover - protects local experimentation with numba.
-        score = _python_packed_score(encoded)
-
+def _simple_board_terms(board: chess.Board) -> int:
+    """Return the original bishop-pair and passed-pawn terms."""
+    score = 0
     # Bishop pairs and passed pawns are unusually valuable simple terms at shallow depth.
     for color, sign in ((chess.WHITE, 1), (chess.BLACK, -1)):
         if len(board.pieces(chess.BISHOP, color)) >= 2:
@@ -172,12 +300,41 @@ def evaluate_white(board: chess.Board) -> int:
     return score
 
 
+def evaluate_white(board: chess.Board) -> int:
+    """Return centipawns for White, including inexpensive positional terms."""
+    encoded = encode_white_perspective(board)
+    try:
+        score = int(_packed_score(encoded)) if NUMBA_AVAILABLE else _python_packed_score(encoded)
+    except Exception:  # pragma: no cover - protects local experimentation with numba.
+        score = _python_packed_score(encoded)
+    return score + _simple_board_terms(board)
+
+
 def evaluate_for_side_to_move(board: chess.Board) -> int:
     """Return a score in centipawns for the side that has the next move."""
     score = evaluate_white(board)
     return score if board.turn == chess.WHITE else -score
 
 
+def evaluate_white_v2(board: chess.Board) -> int:
+    """Return the baseline plus experimental low-cost strategic terms."""
+    encoded = encode_white_perspective(board)
+    try:
+        packed = int(_packed_score(encoded)) if NUMBA_AVAILABLE else _python_packed_score(encoded)
+        strategic = int(_strategic_score(encoded))
+    except Exception:  # pragma: no cover - protects minimal developer environments.
+        packed = _python_packed_score(encoded)
+        strategic = _strategic_score_impl(encoded)
+    return packed + _simple_board_terms(board) + strategic
+
+
+def evaluate_for_side_to_move_v2(board: chess.Board) -> int:
+    """Return the experimental strategic score for the side to move."""
+    score = evaluate_white_v2(board)
+    return score if board.turn == chess.WHITE else -score
+
+
 # Compile the numeric path inside the competition's import-time allowance.
 if NUMBA_AVAILABLE:
     _packed_score(np.zeros(64, dtype=np.int8))
+    _strategic_score(np.zeros(64, dtype=np.int8))

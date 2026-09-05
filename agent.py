@@ -22,6 +22,7 @@ from engine_aux import (
     SyzygyTablebases,
 )
 from engine_core import SearchEngine
+from engine_eval import evaluate_for_side_to_move_v2
 from engine_experimental import ImplicitSearch, PhaseExpertRouter, PuctSearch, SquareTokenPolicy
 from engine_neural import ONNXPolicy, SparseNNUE
 from engine_time import TimeManager
@@ -30,7 +31,7 @@ SUPPORTED_MODES: Final = frozenset({"alphabeta", "mcts", "dag", "policy", "impli
 requested_mode = os.environ.get("CHESSATHON_ENGINE", "alphabeta").strip().lower()
 ENGINE_MODE: Final = requested_mode if requested_mode in SUPPORTED_MODES else "alphabeta"
 
-# Import happens once per game inside the separate 60-second initialisation budget.
+# Import happens once per game inside the separate 90-second initialisation budget.
 NNUE = SparseNNUE.from_shipped_weights()
 POLICY = ONNXPolicy()
 BOOK = PolyglotBook()
@@ -110,7 +111,7 @@ def _emit_metrics(time_left_ms: int, source: str, board: chess.Board, move: ches
 
 
 SEARCH = SearchEngine(
-    evaluator=_nnue_side_to_move if NNUE.enabled else None,
+    evaluator=_nnue_side_to_move if NNUE.enabled else evaluate_for_side_to_move_v2,
     policy=POLICY.score_moves if POLICY.enabled else None,
     policy_max_ply=0,
     time_manager=TIME_MANAGER,
